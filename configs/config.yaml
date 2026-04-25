@@ -1,0 +1,49 @@
+# configs/config.yaml — Development environment
+# All values here are for local dev with docker-compose (single MySQL + single Redis).
+# Override any value via APP_<KEY> env vars, e.g. APP_SERVER_PORT=9090.
+
+server:
+  port: 8080
+  mode: debug        # debug | release | test
+  read_timeout: 10s
+  write_timeout: 10s
+  idle_timeout: 60s
+
+database:
+  # Dev: root connects to the cooking_platform database exposed on localhost:3306.
+  # The password matches MYSQL_ROOT_PASSWORD in docker-compose.yml.
+  dsn: "root:cooking123@tcp(127.0.0.1:3306)/cooking_platform?charset=utf8mb4&parseTime=True&loc=Local&timeout=5s"
+  max_open_conns: 25
+  max_idle_conns: 10
+  max_lifetime: 5m
+  max_idle_time: 5m
+  log_level: info    # silent | error | warn | info
+
+redis:
+  # Dev: no password, default port exposed by docker-compose.
+  addr: "127.0.0.1:6379"
+  password: ""
+  db: 0
+  pool_size: 10
+  dial_timeout: 5s
+  read_timeout: 3s
+  write_timeout: 3s
+
+log:
+  level: debug        # debug | info | warn | error
+  console: true       # true = coloured console output (dev); false = JSON file (prod)
+  filename: logs/app.log
+  max_size: 100       # MB
+  max_backups: 7
+  max_age: 30         # days
+  compress: true
+
+jwt:
+  secret: "dev-jwt-secret-change-in-production-min-32-chars"
+  access_token_ttl: 2h
+  refresh_token_ttl: 168h   # 7 days
+
+mq:
+  provider: channel   # channel (MVP) | rabbitmq (production)
+  url: ""             # amqp://user:pass@host:5672/ — only used when provider=rabbitmq
+  timeout: 5s

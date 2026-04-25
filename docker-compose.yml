@@ -1,0 +1,65 @@
+# docker-compose.yml — Development environment
+# Single MySQL 8.0 + single Redis 7.2. No replication, no Sentinel, no RabbitMQ.
+# Production docker-compose (with high availability) lives at docker-compose.prod.yml
+# and will be generated in Phase 3 (Step 13).
+#
+# Usage:
+#   make docker-up   → start MySQL + Redis in background
+#   make docker-down → stop and remove containers (volumes preserved)
+#   make docker-down V=1 → also remove volumes (wipes data)
+
+version: "3.9"
+
+services:
+
+  # ── MySQL 8.0 ─────────────────────────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: cooking-mysql-dev
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: cooking123
+      MYSQL_DATABASE: cooking_platform
+      # Root user is sufficient for dev. Named user added in Step 11 (security hardening).
+    ports:
+      - "3306:3306"   # exposed to host so `go run ./cmd/server` can connect directly
+    volumes:
+      - mysql-dev-data:/var/lib/mysql
+      # Custom MySQL config: ngram_token_size=2, utf8mb4, GTID (mirrors prod settings)
+      - ./deploy/mysql/dev.cnf:/etc/mysql/conf.d/dev.cnf:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-pcooking123"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - cooking-dev-net
+
+  # ── Redis 7.2 ─────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: cooking-redis-dev
+    restart: unless-stopped
+    # No password in dev (matches configs/config.yaml redis.password = "").
+    # Persistence disabled to keep dev startup fast; enable in prod.
+    command: redis-server --save "" --appendonly no
+    ports:
+      - "6379:6379"   # exposed to host so `go run ./cmd/server` can connect directly
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      - cooking-dev-net
+
+volumes:
+  mysql-dev-data:
+    driver: local
+    # Data persists across `docker compose down` (requires `docker compose down -v` to wipe).
+
+networks:
+  cooking-dev-net:
+    driver: bridge

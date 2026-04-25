@@ -1,0 +1,50 @@
+# deploy/mysql/dev.cnf
+# Mounted into the MySQL container at /etc/mysql/conf.d/dev.cnf (read-only).
+#
+# Key settings for this platform:
+#   ngram_token_size=2  — required for Chinese full-text search (PRD-Phase3 §5 + §15)
+#   utf8mb4             — full Unicode support (emoji in usernames/posts)
+#   GTID mode           — prerequisite for master–slave replication in Phase 3
+#   binlog_format=ROW   — required for GTID + reliable replication
+
+[mysqld]
+# ── Character set ─────────────────────────────────────────────────────────────
+character-set-server   = utf8mb4
+collation-server       = utf8mb4_unicode_ci
+init_connect           = 'SET NAMES utf8mb4'
+
+# ── Full-text search (ngram tokeniser for Chinese) ───────────────────────────
+ngram_token_size       = 2    # minimum Chinese word unit; matches our FULLTEXT index
+
+# ── Timezone ──────────────────────────────────────────────────────────────────
+default_time_zone      = '+08:00'
+
+# ── Replication (GTID — enabled now so dev mirrors prod; not actively used yet) ──
+server-id              = 1
+gtid_mode              = ON
+enforce_gtid_consistency = ON
+binlog_format          = ROW
+log_bin                = mysql-bin
+binlog_expire_logs_seconds = 604800   # 7 days
+
+# ── InnoDB performance (tuned for a dev VM; raise innodb_buffer_pool_size in prod) ──
+innodb_buffer_pool_size    = 256M
+innodb_log_file_size       = 64M
+innodb_flush_log_at_trx_commit = 1   # full ACID (set to 2 in read-heavy dev if disk is slow)
+innodb_file_per_table      = ON
+
+# ── Connection limits (generous for dev) ──────────────────────────────────────
+max_connections            = 200
+wait_timeout               = 600
+interactive_timeout        = 600
+
+# ── Slow query log (helps catch N+1 during development) ──────────────────────
+slow_query_log             = ON
+slow_query_log_file        = /var/lib/mysql/slow.log
+long_query_time            = 1
+
+[client]
+default-character-set = utf8mb4
+
+[mysql]
+default-character-set = utf8mb4

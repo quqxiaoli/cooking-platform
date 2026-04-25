@@ -1,0 +1,46 @@
+# configs/config.prod.yaml — Production environment template.
+# Values in <> must be replaced with real secrets before deployment.
+# Loaded when CONFIG_PATH=configs/config.prod.yaml (set in docker-compose.prod.yml).
+
+server:
+  port: 8080
+  mode: release
+  read_timeout: 10s
+  write_timeout: 10s
+  idle_timeout: 60s
+
+database:
+  dsn: "<DB_USER>:<DB_PASSWORD>@tcp(mysql-master:3306)/cooking_platform?charset=utf8mb4&parseTime=True&loc=Local&timeout=5s"
+  max_open_conns: 50
+  max_idle_conns: 20
+  max_lifetime: 5m
+  max_idle_time: 5m
+  log_level: warn
+
+redis:
+  addr: "redis-master:6379"   # sentinel mode configured separately via env
+  password: "<REDIS_PASSWORD>"
+  db: 0
+  pool_size: 20
+  dial_timeout: 5s
+  read_timeout: 3s
+  write_timeout: 3s
+
+log:
+  level: info
+  console: false
+  filename: /var/log/cooking/app.log
+  max_size: 200
+  max_backups: 14
+  max_age: 30
+  compress: true
+
+jwt:
+  secret: "<JWT_SECRET_MIN_32_CHARS>"
+  access_token_ttl: 2h
+  refresh_token_ttl: 168h
+
+mq:
+  provider: rabbitmq
+  url: "amqp://<RABBITMQ_USER>:<RABBITMQ_PASSWORD>@rabbitmq:5672/"
+  timeout: 5s

@@ -1,0 +1,45 @@
+# ── Secrets (never commit) ────────────────────────────────────────────────────
+.env
+*.pem
+*.key
+*.p12
+*.pfx
+
+# ── Build artefacts ───────────────────────────────────────────────────────────
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# ── Test & coverage ───────────────────────────────────────────────────────────
+*.test
+coverage.out
+coverage.html
+
+# ── Go module cache (managed by go toolchain, not the repo) ──────────────────
+vendor/
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+logs/
+*.log
+
+# ── IDE / OS ──────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+# Local overrides — do not commit per-developer docker-compose tweaks
+docker-compose.override.yml
+
+# ── Certificates (generated locally, not checked in) ─────────────────────────
+deploy/nginx/certs/
+
+# ── Temporary / scratch files ─────────────────────────────────────────────────
+tmp/
+scratch/
