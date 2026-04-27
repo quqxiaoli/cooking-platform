@@ -1,5 +1,4 @@
-# configs/config.yaml — Development environment
-# All values here are for local dev with docker-compose (single MySQL + single Redis).
+# configs/config.yaml — Development environment configuration.
 # Override any value via APP_<KEY> env vars, e.g. APP_SERVER_PORT=9090.
 
 server:
@@ -47,3 +46,23 @@ mq:
   provider: channel   # channel (MVP) | rabbitmq (production)
   url: ""             # amqp://user:pass@host:5672/ — only used when provider=rabbitmq
   timeout: 5s
+
+# [Step 3] SMS provider configuration.
+# Dev uses 'mock' — verification codes are logged instead of sent.
+# Inspect logs to find the code: search for "[SMS MOCK]" in stdout.
+sms:
+  provider: mock      # mock | aliyun
+  sign_name: ""       # Aliyun signature, only used when provider=aliyun
+  template_code: ""   # Aliyun template ID, only used when provider=aliyun
+  code_length: 6
+  code_ttl: 5m
+
+# [Step 3] Rate-limit configuration.
+# Three-dimension SMS protection (enforced in internal/service/user_service.go):
+#   - sms_phone_window: minimum interval between two send-code requests for the same phone
+#   - sms_per_phone_per_day: max sends to the same phone in 24h
+#   - sms_per_ip_per_day: max sends from the same IP in 24h (IP is SHA-256 hashed before use)
+ratelimit:
+  sms_phone_window: 60s
+  sms_per_phone_per_day: 5
+  sms_per_ip_per_day: 10

@@ -8,7 +8,6 @@
 #   make docker-down → stop and remove containers (volumes preserved)
 #   make docker-down V=1 → also remove volumes (wipes data)
 
-version: "3.9"
 
 services:
 

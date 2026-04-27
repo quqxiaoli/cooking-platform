@@ -1,5 +1,3 @@
-// Command server is the application entrypoint.
-// Boot sequence: config → logger → MySQL → Redis → EventBus → ConsumerManager → Gin → HTTP server → graceful shutdown.
 package main
 
 import (
@@ -12,12 +10,18 @@ import (
 	"syscall"
 	"time"
 
+	"cooking-platform/internal/cache"
 	"cooking-platform/internal/consumer"
 	"cooking-platform/internal/event"
 	"cooking-platform/internal/handler"
 	"cooking-platform/internal/middleware"
+	"cooking-platform/internal/repository"
+	"cooking-platform/internal/service"
 	"cooking-platform/pkg/config"
+	jwtpkg "cooking-platform/pkg/jwt"
 	"cooking-platform/pkg/logger"
+	"cooking-platform/pkg/sms"
+	customvalidator "cooking-platform/pkg/validator"
 
 	"github.com/gin-gonic/gin"
 	goredis "github.com/redis/go-redis/v9"
@@ -47,6 +51,7 @@ func main() {
 		zap.String("mode", cfg.Server.Mode),
 		zap.Int("port", cfg.Server.Port),
 		zap.String("mq_provider", cfg.MQ.Provider),
+		zap.String("sms_provider", cfg.SMS.Provider),
 	)
 
 	// ── 3. MySQL ──────────────────────────────────────────────────────────────
@@ -64,9 +69,6 @@ func main() {
 	log.Info("redis connected")
 
 	// ── 5. EventBus ───────────────────────────────────────────────────────────
-	// [第 2 步新增] 根据 cfg.MQ.Provider 选择实现：
-	//   "channel"  → 进程内 Go Channel（MVP，零外部依赖）
-	//   "rabbitmq" → 第 13 步实现，当前配置此值会快速失败
 	bus, err := initEventBus(cfg.MQ)
 	if err != nil {
 		log.Fatal("init event bus", zap.Error(err))
@@ -74,17 +76,37 @@ func main() {
 	log.Info("event bus initialized", zap.String("provider", cfg.MQ.Provider))
 
 	// ── 6. ConsumerManager ────────────────────────────────────────────────────
-	// [第 2 步新增] 当前无业务 Consumer，StartAll 启动 0 个 goroutine。
-	// 第 5 步起在此处 Register 业务 Consumer：
-	//   consumerMgr.Register(consumer.NewLikeConsumer(bus, db, rdb))
 	consumerMgr := consumer.NewManager()
 	consumerMgr.StartAll()
 
-	// ── 7. Gin engine ─────────────────────────────────────────────────────────
-	gin.SetMode(cfg.Server.Mode)
-	engine := setupRouter(db, rdb)
+	// ── 7. [Step 3] User module wiring ────────────────────────────────────────
+	// Order: cache → repo → JWT manager → SMS sender → service → handler.
+	// Each layer depends only on what was constructed before it.
+	userCache := cache.NewUserCache(rdb)
+	userRepo := repository.NewUserRepository(db)
+	jwtMgr := jwtpkg.NewManager(cfg.JWT)
 
-	// ── 8. HTTP server ────────────────────────────────────────────────────────
+	smsSender, err := sms.NewSender(cfg.SMS)
+	if err != nil {
+		log.Fatal("init sms sender", zap.Error(err))
+	}
+	log.Info("sms sender initialized", zap.String("provider", cfg.SMS.Provider))
+
+	userSvc := service.NewUserService(userRepo, userCache, jwtMgr, smsSender, cfg.SMS, cfg.Ratelimit)
+	userHandler := handler.NewUserHandler(userSvc)
+
+	// ── 8. Custom validator registration ──────────────────────────────────────
+	// Must run BEFORE setupRouter so any DTO using `binding:"phone"` works.
+	if err := customvalidator.Register(); err != nil {
+		log.Fatal("register custom validators", zap.Error(err))
+	}
+	log.Info("custom validators registered")
+
+	// ── 9. Gin engine ─────────────────────────────────────────────────────────
+	gin.SetMode(cfg.Server.Mode)
+	engine := setupRouter(db, rdb, userSvc, userHandler)
+
+	// ── 10. HTTP server ───────────────────────────────────────────────────────
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	srv := &http.Server{
 		Addr:         addr,
@@ -101,66 +123,110 @@ func main() {
 		}
 	}()
 
-	// ── 9. Graceful shutdown ──────────────────────────────────────────────────
+	// ── 11. Wait for shutdown signal ──────────────────────────────────────────
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	sig := <-quit
-	log.Info("shutdown signal received", zap.String("signal", sig.String()))
+	<-quit
 
-	// [第 2 步修改] 关闭顺序：HTTP Server → ConsumerManager → EventBus → Redis → MySQL
-	// 原则：先停流量入口，再停异步消费，再关基础设施，保证无消息丢失。
+	log.Info("shutdown signal received")
 
-	// 9-a. HTTP Server：给存量请求 30 秒排空
+	// ── 12. Graceful shutdown (LIFO order) ────────────────────────────────────
+	// HTTP Server → ConsumerManager → EventBus → Redis → MySQL
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Error("http server shutdown error", zap.Error(err))
+		log.Error("http server shutdown", zap.Error(err))
+	} else {
+		log.Info("http server stopped")
 	}
-	log.Info("http server stopped")
 
-	// 9-b. ConsumerManager：cancel ctx → 等所有 Consumer 处理完当前消息退出
+	log.Info("consumer manager shutting down...")
 	consumerMgr.Shutdown()
+	log.Info("consumer manager stopped")
 
-	// 9-c. EventBus：Consumer 全部退出后再关闭，无竞态
 	if err := bus.Close(); err != nil {
-		log.Error("event bus close error", zap.Error(err))
+		log.Error("event bus close", zap.Error(err))
+	} else {
+		log.Info("event bus closed")
 	}
 
-	// 9-d. Redis
 	if err := rdb.Close(); err != nil {
-		log.Error("redis close error", zap.Error(err))
+		log.Error("redis close", zap.Error(err))
+	} else {
+		log.Info("redis close ok")
 	}
-	log.Info("redis close ok")
 
-	// 9-e. MySQL
-	sqlDB, _ := db.DB()
-	if err := sqlDB.Close(); err != nil {
-		log.Error("mysql close error", zap.Error(err))
+	if sqlDB, err := db.DB(); err == nil {
+		if err := sqlDB.Close(); err != nil {
+			log.Error("mysql close", zap.Error(err))
+		} else {
+			log.Info("mysql close ok")
+		}
 	}
-	log.Info("mysql close ok")
 
 	log.Info("server exited cleanly")
 }
 
-// setupRouter builds the gin.Engine, registers global middleware, and mounts routes.
-func setupRouter(db *gorm.DB, rdb *goredis.Client) *gin.Engine {
+// setupRouter wires HTTP routes for all modules.
+//
+// Signature evolution: each module added in subsequent steps brings its own
+// service/handler pair as parameters. Keep all routes in this single function
+// so the URL structure of the API is visible at one glance.
+//
+// [Step 3] adds: userSvc (for Auth middleware), userHandler (for v1 routes).
+func setupRouter(
+	db *gorm.DB,
+	rdb *goredis.Client,
+	userSvc *service.UserService,
+	userHandler *handler.UserHandler,
+) *gin.Engine {
 	r := gin.New()
 
+	// Global middlewares (order matters):
+	//   Recovery → must be first so it catches panics from everything below.
+	//   RequestID → must precede Logger so log lines carry the ID.
 	r.Use(middleware.Recovery())
 	r.Use(middleware.RequestID())
 	r.Use(middleware.Logger())
 	r.Use(middleware.CORS())
 
+	// Infrastructure routes (no auth required).
 	healthHandler := handler.NewHealthHandler(db, rdb)
 	r.GET("/health", healthHandler.Health)
 	r.GET("/readiness", healthHandler.Readiness)
 
-	// v1 := r.Group("/api/v1")
+	// ── /api/v1 group ─────────────────────────────────────────────────────────
+	v1 := r.Group("/api/v1")
+
+	// [Step 3] Auth routes — public (no JWT required).
+	authGroup := v1.Group("/auth")
+	{
+		authGroup.POST("/send-code", userHandler.SendCode)
+		authGroup.POST("/login", userHandler.Login)
+		authGroup.POST("/refresh", userHandler.Refresh)
+		// Logout requires a valid token (we need its JTI to blacklist).
+		authGroup.POST("/logout", middleware.Auth(userSvc), userHandler.Logout)
+	}
+
+	// [Step 3] User routes — mixed visibility.
+	userGroup := v1.Group("/users")
+	{
+		// Public — anyone can view a user's public profile.
+		userGroup.GET("/:id", userHandler.GetPublicProfile)
+
+		// Protected — current user only.
+		me := userGroup.Group("/me", middleware.Auth(userSvc))
+		{
+			me.GET("", userHandler.GetMyProfile)
+			me.PATCH("", userHandler.UpdateProfile)
+		}
+	}
 
 	return r
 }
 
-// initMySQL 与第 1 步完全一致，未做任何修改。
+// initMySQL is unchanged from Step 1.
 func initMySQL(cfg config.DatabaseConfig) (*gorm.DB, error) {
 	gormLevel := gormlogger.Warn
 	switch cfg.LogLevel {
@@ -198,7 +264,7 @@ func initMySQL(cfg config.DatabaseConfig) (*gorm.DB, error) {
 	return db, nil
 }
 
-// initRedis 与第 1 步完全一致，未做任何修改。
+// initRedis is unchanged from Step 1.
 func initRedis(cfg config.RedisConfig) (*goredis.Client, error) {
 	rdb := goredis.NewClient(&goredis.Options{
 		Addr:         cfg.Addr,
@@ -219,11 +285,7 @@ func initRedis(cfg config.RedisConfig) (*goredis.Client, error) {
 	return rdb, nil
 }
 
-// initEventBus 根据配置选择 EventBus 实现。
-// [第 2 步新增]
-//
-//	"channel"  → ChannelBus（MVP，进程内，零外部依赖）
-//	"rabbitmq" → 第 13 步实现，当前返回 error 快速失败防止误配置上线
+// initEventBus is unchanged from Step 2.
 func initEventBus(cfg config.MQConfig) (event.EventBus, error) {
 	switch cfg.Provider {
 	case "channel", "":

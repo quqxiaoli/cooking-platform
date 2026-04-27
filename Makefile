@@ -10,14 +10,14 @@ CONFIG     ?= configs/config.yaml
 # golang-migrate DSN (used by migrate-up / migrate-down).
 # Override on CLI: make migrate-up MIGRATE_DSN="mysql://root:cooking123@tcp(127.0.0.1:3306)/cooking_platform"
 MIGRATE_DSN ?= mysql://root:cooking123@tcp(127.0.0.1:3306)/cooking_platform
-MIGRATIONS  := file://migrations
+MIGRATIONS  := migrations
 
 # Docker Compose file (dev by default).
 DC_FILE  ?= docker-compose.yml
 V        ?= 0   # set V=1 to also remove volumes on docker-down
 
-.PHONY: all build run test lint \
-        migrate-up migrate-down migrate-status migrate-force \
+.PHONY: all build run test test-cover lint lint-fix \
+        check-migrate migrate-up migrate-down migrate-status migrate-force migrate-create \
         docker-up docker-down docker-logs docker-ps \
         clean deps help
 
@@ -63,22 +63,35 @@ deps:
 	go mod tidy
 	go mod download
 
-# ── Database Migrations ───────────────────────────────────────────────────────
+# ── Database Migrations (golang-migrate) ──────────────────────────────────────
+# Requires `migrate` CLI installed on host:
+#   macOS:  brew install golang-migrate
+#   Linux:  see https://github.com/golang-migrate/migrate/releases
+
+## check-migrate: verify the migrate CLI is installed before running migrations
+check-migrate:
+	@which migrate > /dev/null || (echo "ERROR: 'migrate' CLI not found. Install with:" && echo "  macOS:  brew install golang-migrate" && echo "  Linux:  https://github.com/golang-migrate/migrate/releases" && exit 1)
+
 ## migrate-up: apply all pending migrations
-migrate-up:
+migrate-up: check-migrate
 	migrate -path $(MIGRATIONS) -database "$(MIGRATE_DSN)" up
 
 ## migrate-down: roll back the last applied migration
-migrate-down:
+migrate-down: check-migrate
 	migrate -path $(MIGRATIONS) -database "$(MIGRATE_DSN)" down 1
 
 ## migrate-status: show current migration version
-migrate-status:
+migrate-status: check-migrate
 	migrate -path $(MIGRATIONS) -database "$(MIGRATE_DSN)" version
 
 ## migrate-force VERSION=N: force-set migration version (use after manual fix)
-migrate-force:
+migrate-force: check-migrate
 	migrate -path $(MIGRATIONS) -database "$(MIGRATE_DSN)" force $(VERSION)
+
+## migrate-create: scaffold a new migration pair. Usage: make migrate-create name=add_some_column
+migrate-create:
+	@if [ -z "$(name)" ]; then echo "ERROR: name required. Usage: make migrate-create name=add_some_column"; exit 1; fi
+	migrate create -ext sql -dir migrations -seq $(name)
 
 # ── Docker ────────────────────────────────────────────────────────────────────
 ## docker-up: start dev infrastructure (MySQL + Redis) in background
