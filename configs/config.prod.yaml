@@ -44,3 +44,25 @@ mq:
   provider: rabbitmq
   url: "amqp://<RABBITMQ_USER>:<RABBITMQ_PASSWORD>@rabbitmq:5672/"
   timeout: 5s
+
+# [Step 3 / Step 10] Production uses real Aliyun SMS.
+# APP_ALIYUN_ACCESS_KEY_ID and APP_ALIYUN_ACCESS_KEY_SECRET come from env
+# (configured in Step 10 when Aliyun integration goes live).
+sms:
+  provider: aliyun
+  sign_name: "<SMS_SIGN_NAME>"
+  template_code: "<SMS_TEMPLATE_CODE>"
+  code_length: 6
+  code_ttl: 5m
+
+# [Step 3] Rate-limit configuration.
+# Three-dimension SMS protection (enforced in internal/service/user_service.go):
+#   - sms_phone_window: minimum interval between two send-code requests for the same phone
+#   - sms_per_phone_per_day: max sends to the same phone in 24h
+#   - sms_per_ip_per_day: max sends from the same IP in 24h (IP is SHA-256 hashed before use)
+# Production values match dev — these are UX knobs, not security knobs.
+# Tune after observing real traffic patterns post-launch.
+ratelimit:
+  sms_phone_window: 60s
+  sms_per_phone_per_day: 5
+  sms_per_ip_per_day: 10
