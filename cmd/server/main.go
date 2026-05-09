@@ -95,6 +95,22 @@ func main() {
 	userSvc := service.NewUserService(userRepo, userCache, jwtMgr, smsSender, cfg.SMS, cfg.Ratelimit)
 	userHandler := handler.NewUserHandler(userSvc)
 
+	// ── 7.5 [Step 4] Post module wiring ───────────────────────────────────────
+	// Order: cache → repo → service → handler. Each layer depends only on
+	// what was constructed before it. PostService takes the userRepo from
+	// Step 3 to embed author snapshots in feed/detail responses.
+	//
+	// PostService publishes via the EventPublisher interface (not the full
+	// EventBus) so the dependency direction is clean: service emits events,
+	// it does not subscribe to them. Subscription belongs to consumers,
+	// which are wired separately at Step 6 in the boot sequence.
+	postRepo := repository.NewPostRepository(db)
+	feedCache := cache.NewFeedCache(rdb)
+	postSvc := service.NewPostService(postRepo, userRepo, feedCache, bus)
+	postHandler := handler.NewPostHandler(postSvc)
+	feedHandler := handler.NewFeedHandler(postSvc)
+	log.Info("post module wired")
+
 	// ── 8. Custom validator registration ──────────────────────────────────────
 	// Must run BEFORE setupRouter so any DTO using `binding:"phone"` works.
 	if err := customvalidator.Register(); err != nil {
@@ -103,8 +119,9 @@ func main() {
 	log.Info("custom validators registered")
 
 	// ── 9. Gin engine ─────────────────────────────────────────────────────────
+	// ── 9. Gin engine ─────────────────────────────────────────────────────────
 	gin.SetMode(cfg.Server.Mode)
-	engine := setupRouter(db, rdb, userSvc, userHandler)
+	engine := setupRouter(db, rdb, userSvc, userHandler, postHandler, feedHandler)
 
 	// ── 10. HTTP server ───────────────────────────────────────────────────────
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
@@ -175,11 +192,16 @@ func main() {
 // so the URL structure of the API is visible at one glance.
 //
 // [Step 3] adds: userSvc (for Auth middleware), userHandler (for v1 routes).
+// [Step 4] adds: postHandler (POST /posts, GET /posts/:id),
+//
+//	feedHandler (GET /feed, GET /users/:id/posts).
 func setupRouter(
 	db *gorm.DB,
 	rdb *goredis.Client,
 	userSvc *service.UserService,
 	userHandler *handler.UserHandler,
+	postHandler *handler.PostHandler,
+	feedHandler *handler.FeedHandler,
 ) *gin.Engine {
 	r := gin.New()
 
@@ -209,18 +231,55 @@ func setupRouter(
 		authGroup.POST("/logout", middleware.Auth(userSvc), userHandler.Logout)
 	}
 
-	// [Step 3] User routes — mixed visibility.
+	// [Step 3+4] User routes — mixed visibility.
 	userGroup := v1.Group("/users")
 	{
 		// Public — anyone can view a user's public profile.
 		userGroup.GET("/:id", userHandler.GetPublicProfile)
 
+		// [Step 4] Public — author timeline (cursor-paginated).
+		// Note: this lives under /users/:id/ rather than /feed?author=:id
+		// to mirror the PRD-Phase3 §7.1 follow-route style
+		// (/users/:id/followers, /users/:id/following).
+		userGroup.GET("/:id/posts", feedHandler.ListByUser)
+
 		// Protected — current user only.
-		me := userGroup.Group("/me", middleware.Auth(userSvc))
+		meGroup := userGroup.Group("/me", middleware.Auth(userSvc))
 		{
-			me.GET("", userHandler.GetMyProfile)
-			me.PATCH("", userHandler.UpdateProfile)
+			meGroup.GET("", userHandler.GetMyProfile)
+			meGroup.PATCH("", userHandler.UpdateProfile)
 		}
+	}
+
+	// [Step 4] Post routes — write requires auth + rate limit; reads are public.
+	//
+	// Rate-limit policy: limit:pub:{user_id}, 20 posts per 24h, sliding window.
+	// PRD-Phase3 §6.3 specifies this cap to deter spam without throttling
+	// reasonable creators (20/day = one every 72 minutes on average).
+	//
+	// The limit is enforced AFTER Auth — chain order matters: an anonymous
+	// request gets a 401 (cheaper) before any Redis trip happens.
+	postGroup := v1.Group("/posts")
+	{
+		postGroup.POST("",
+			middleware.Auth(userSvc),
+			middleware.RateLimit(middleware.RateLimitConfig{
+				RDB:     rdb,
+				KeyFunc: middleware.PerUserKey("limit:pub"),
+				Limit:   20,
+				Window:  24 * time.Hour,
+			}),
+			postHandler.Create,
+		)
+		// Detail is public so feed cards (which may include unauth users)
+		// can deep-link into a post without forcing login.
+		postGroup.GET("/:id", postHandler.GetDetail)
+	}
+
+	// [Step 4] Feed routes — public.
+	feedGroup := v1.Group("/feed")
+	{
+		feedGroup.GET("", feedHandler.ListFeed)
 	}
 
 	return r

@@ -61,3 +61,21 @@ var (
 	ErrBioTooLong       = New(http.StatusBadRequest, 410111, "bio is too long")
 	ErrAvatarURLInvalid = New(http.StatusBadRequest, 410112, "invalid avatar URL")
 )
+
+// ── Post Module (4xx, code segment 412xxx) ─────────────────────────────────
+// [Step 4] Defined alongside post creation / feed / detail / author page.
+//
+// Numbering convention: user module owns 410xxx, post module owns 412xxx.
+// 411xxx is reserved for a future user-extension area (e.g. account
+// recovery, device management) so we don't fragment numbering when those
+// land. Numbering scheme matches errcode.go's header: XYYZZZ.
+var (
+	ErrTitleEmpty      = New(http.StatusBadRequest, 412101, "title cannot be empty")
+	ErrTitleTooLong    = New(http.StatusBadRequest, 412102, "title exceeds 100 characters")
+	ErrSceneTagInvalid = New(http.StatusBadRequest, 412103, "scene_tag must be between 1 and 8")
+	ErrPostNotFound    = New(http.StatusNotFound, 412104, "post not found")
+	ErrPostForbidden   = New(http.StatusForbidden, 412105, "no permission for this post")
+	ErrCursorInvalid   = New(http.StatusBadRequest, 412106, "invalid cursor")
+	ErrPageSizeInvalid = New(http.StatusBadRequest, 412107, "page size must be between 1 and 50")
+	ErrContentTooLong  = New(http.StatusBadRequest, 412108, "content exceeds 5000 characters")
+)
