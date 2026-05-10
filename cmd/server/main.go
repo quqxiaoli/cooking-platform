@@ -1,3 +1,27 @@
+// Package main is the cooking-platform entry point.
+//
+// Boot sequence (see numbered comments below for the canonical order):
+//
+//  1. Configuration
+//  2. Logger
+//  3. MySQL
+//  4. Redis
+//  5. EventBus
+//  6. ConsumerManager — created empty; consumers register at 7.6
+//  7. User module wiring                    (Step 3)
+//     7.5  Post module wiring                    (Step 4)
+//     7.6  Like module + Consumer wiring + StartAll  (Step 5)
+//  8. Custom validator registration         (Step 3)
+//  9. gin.SetMode + setupRouter
+//  10. HTTP server start
+//  11. Wait for SIGINT/SIGTERM
+//  12. Graceful shutdown (LIFO):
+//     HTTP Server → ConsumerManager → EventBus → Redis → MySQL
+//
+// Step 5 added stage 7.6 because consumers depend on the EventBus (stage 5)
+// AND the repositories (stages 7 / 7.5). Putting StartAll at the end of
+// 7.6 — after all Register calls — is mandatory; the empty Manager at
+// stage 6 is just a placeholder so the variable is in scope for shutdown.
 package main
 
 import (
@@ -75,9 +99,12 @@ func main() {
 	}
 	log.Info("event bus initialized", zap.String("provider", cfg.MQ.Provider))
 
-	// ── 6. ConsumerManager ────────────────────────────────────────────────────
+	// ── 6. ConsumerManager (empty placeholder) ────────────────────────────────
+	// Step 5 change: consumers are registered in stage 7.6 (after their
+	// repository dependencies are constructed), then StartAll is invoked
+	// at the END of 7.6 — not here. We still create the manager up-front
+	// so its variable is captured in the same scope as the shutdown block.
 	consumerMgr := consumer.NewManager()
-	consumerMgr.StartAll()
 
 	// ── 7. [Step 3] User module wiring ────────────────────────────────────────
 	// Order: cache → repo → JWT manager → SMS sender → service → handler.
@@ -103,13 +130,34 @@ func main() {
 	// PostService publishes via the EventPublisher interface (not the full
 	// EventBus) so the dependency direction is clean: service emits events,
 	// it does not subscribe to them. Subscription belongs to consumers,
-	// which are wired separately at Step 6 in the boot sequence.
+	// which are wired separately at stage 7.6.
 	postRepo := repository.NewPostRepository(db)
 	feedCache := cache.NewFeedCache(rdb)
 	postSvc := service.NewPostService(postRepo, userRepo, feedCache, bus)
 	postHandler := handler.NewPostHandler(postSvc)
 	feedHandler := handler.NewFeedHandler(postSvc)
 	log.Info("post module wired")
+
+	// ── 7.6 [Step 5] Like module + Consumer wiring ────────────────────────────
+	// Order:
+	//   a. Like module dependencies (cache → repo → service → handler).
+	//   b. Register the THREE consumers (LikeConsumer, PVConsumer, CountConsumer)
+	//      with the manager. They all need the EventSubscriber side of `bus`
+	//      and write to the master MySQL via the existing repos / raw SQL.
+	//   c. StartAll: now-and-only-now we boot the consumer goroutines.
+	//      Doing it here (not earlier) ensures every consumer's deps exist;
+	//      doing it BEFORE setupRouter ensures consumers are draining the
+	//      bus before the first HTTP request can publish.
+	likeRepo := repository.NewLikeRepository(db)
+	likeCache := cache.NewLikeCache(rdb)
+	likeSvc := service.NewLikeService(postRepo, likeCache, bus)
+	likeHandler := handler.NewLikeHandler(likeSvc)
+	log.Info("like module wired")
+
+	consumerMgr.Register(consumer.NewLikeConsumer(bus, likeRepo))
+	consumerMgr.Register(consumer.NewPVConsumer(bus, db))
+	consumerMgr.Register(consumer.NewCountConsumer(bus, db))
+	consumerMgr.StartAll()
 
 	// ── 8. Custom validator registration ──────────────────────────────────────
 	// Must run BEFORE setupRouter so any DTO using `binding:"phone"` works.
@@ -119,9 +167,8 @@ func main() {
 	log.Info("custom validators registered")
 
 	// ── 9. Gin engine ─────────────────────────────────────────────────────────
-	// ── 9. Gin engine ─────────────────────────────────────────────────────────
 	gin.SetMode(cfg.Server.Mode)
-	engine := setupRouter(db, rdb, userSvc, userHandler, postHandler, feedHandler)
+	engine := setupRouter(db, rdb, userSvc, userHandler, postHandler, feedHandler, likeHandler)
 
 	// ── 10. HTTP server ───────────────────────────────────────────────────────
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
@@ -148,7 +195,12 @@ func main() {
 	log.Info("shutdown signal received")
 
 	// ── 12. Graceful shutdown (LIFO order) ────────────────────────────────────
-	// HTTP Server → ConsumerManager → EventBus → Redis → MySQL
+	// HTTP Server → ConsumerManager → EventBus → Redis → MySQL.
+	//
+	// HTTP first so no new events are published while consumers drain.
+	// Consumer manager next so all in-flight events finish persisting.
+	// EventBus then closes so any latent Publish call returns error
+	// instead of blocking. Finally the infrastructure connections.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -195,6 +247,8 @@ func main() {
 // [Step 4] adds: postHandler (POST /posts, GET /posts/:id),
 //
 //	feedHandler (GET /feed, GET /users/:id/posts).
+//
+// [Step 5] adds: likeHandler (POST/DELETE/GET /posts/:id/like).
 func setupRouter(
 	db *gorm.DB,
 	rdb *goredis.Client,
@@ -202,6 +256,7 @@ func setupRouter(
 	userHandler *handler.UserHandler,
 	postHandler *handler.PostHandler,
 	feedHandler *handler.FeedHandler,
+	likeHandler *handler.LikeHandler,
 ) *gin.Engine {
 	r := gin.New()
 
@@ -251,7 +306,7 @@ func setupRouter(
 		}
 	}
 
-	// [Step 4] Post routes — write requires auth + rate limit; reads are public.
+	// [Step 4+5] Post routes — write requires auth + rate limit; reads are public.
 	//
 	// Rate-limit policy: limit:pub:{user_id}, 20 posts per 24h, sliding window.
 	// PRD-Phase3 §6.3 specifies this cap to deter spam without throttling
@@ -259,6 +314,18 @@ func setupRouter(
 	//
 	// The limit is enforced AFTER Auth — chain order matters: an anonymous
 	// request gets a 401 (cheaper) before any Redis trip happens.
+	//
+	// [Step 5] Like routes hang under /posts/:id/like:
+	//   POST   → like        (auth + rate-limit: 200 likes / 24h)
+	//   DELETE → unlike      (auth only — taking back is always allowed)
+	//   GET    → like-status (auth only — answers "have *I* liked this")
+	//
+	// Why like POST is rate-limited but unlike isn't: the abuse vector
+	// is mass-spamming hearts (boosts vanity metrics, triggers fake
+	// notifications). Mass-unliking has no comparable abuse model;
+	// rate-limiting it would just slow legitimate "I changed my mind"
+	// flows. PRD-Phase3 §6.3 sets limit:like at 200/24h, well above
+	// any human use pattern.
 	postGroup := v1.Group("/posts")
 	{
 		postGroup.POST("",
@@ -274,6 +341,26 @@ func setupRouter(
 		// Detail is public so feed cards (which may include unauth users)
 		// can deep-link into a post without forcing login.
 		postGroup.GET("/:id", postHandler.GetDetail)
+
+		// [Step 5] Like resource on a post.
+		postGroup.POST("/:id/like",
+			middleware.Auth(userSvc),
+			middleware.RateLimit(middleware.RateLimitConfig{
+				RDB:     rdb,
+				KeyFunc: middleware.PerUserKey("limit:like"),
+				Limit:   200,
+				Window:  24 * time.Hour,
+			}),
+			likeHandler.Like,
+		)
+		postGroup.DELETE("/:id/like",
+			middleware.Auth(userSvc),
+			likeHandler.Unlike,
+		)
+		postGroup.GET("/:id/like",
+			middleware.Auth(userSvc),
+			likeHandler.GetLikeStatus,
+		)
 	}
 
 	// [Step 4] Feed routes — public.
