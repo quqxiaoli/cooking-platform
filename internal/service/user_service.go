@@ -164,10 +164,23 @@ func (s *UserService) Login(ctx context.Context, phone, code string) (*dto.Login
 			return nil, fmt.Errorf("find user: %w", err)
 		}
 		// First-time login → auto-register.
+		//
+		// CreatedAt/UpdatedAt are set explicitly rather than left to GORM's
+		// autoCreateTime. The model field carries a `default:CURRENT_TIMESTAMP(3)`
+		// tag, which makes GORM v2 treat the column as DB-generated: it skips
+		// both Go-side fillup AND the post-insert read-back. The DB row gets
+		// the right timestamp, but the in-memory `user` handed to toPublicResp
+		// keeps time.Time's zero value (serialises as -62135596800000). This is
+		// bug R-1 from the Step 6 verification report. Setting time.Now() here
+		// makes the login response reliable without a SELECT after INSERT —
+		// the same fix post_service.Create already applies for posts.
+		now := time.Now()
 		user = &model.User{
 			PhoneHash:      phoneHash,
 			PhoneEncrypted: phone, // Step 3: plaintext. Step 11: AES-GCM ciphertext.
 			Nickname:       defaultNickname(phone),
+			CreatedAt:      now,
+			UpdatedAt:      now,
 		}
 		if err := s.repo.Create(ctx, user); err != nil {
 			return nil, fmt.Errorf("create user: %w", err)

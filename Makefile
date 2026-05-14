@@ -19,8 +19,8 @@ V        ?= 0   # set V=1 to also remove volumes on docker-down
 .PHONY: all build run test test-cover lint lint-fix \
         check-migrate migrate-up migrate-down migrate-status migrate-force migrate-create \
         docker-up docker-down docker-logs docker-ps \
+        verify-step7 \
         clean deps help
-
 # ── Default ───────────────────────────────────────────────────────────────────
 all: build
 
@@ -121,6 +121,13 @@ docker-logs:
 docker-ps:
 	docker compose -f $(DC_FILE) ps
 
+# ── Verification ──────────────────────────────────────────────────────────────
+## verify-step7: run the Step 7 search-module end-to-end verification script
+# Prerequisite: server running via `go run ./cmd/server 2>&1 | tee logs/dev.log`
+# and the dev docker stack (cooking-mysql-dev / cooking-redis-dev) up.
+verify-step7:
+	bash scripts/verify_step7.sh
+	
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 ## clean: remove build artefacts
 clean:

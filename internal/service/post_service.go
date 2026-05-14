@@ -16,6 +16,15 @@
 //     acceptable. A failed BumpFeedVersion means stale feeds for up to
 //     300 seconds; acceptable.
 //
+// ── Author-snapshot assembly: shared with search since Step 7 ──────────────
+//
+// The "load authors, embed author brief, build PostListItem" logic used to
+// live as private methods here (loadAuthor / toListItem / makeAuthorBrief /
+// uniqueAuthorIDs). Step 7 extracted it into AuthorAssembler so the search
+// module reuses the exact same implementation. PostService now holds an
+// *AuthorAssembler and delegates to it. Only toDetailResp stays local — the
+// post-detail shape is not shared with search.
+//
 // ── MVP simplifications & the deferred work they imply ─────────────────────
 //
 //   - is_visible is set to 1 at creation and audit_status to 0 (pending).
@@ -52,7 +61,8 @@
 //     re-querying users on every miss. Today the cache stores the JSON
 //     of the full response, so re-querying happens only on miss anyway.
 //
-// Added in Step 4 (content module).
+// Added in Step 4 (content module). Refactored in Step 7 to share
+// AuthorAssembler with the search module.
 package service
 
 import (
@@ -81,6 +91,7 @@ type PostService struct {
 	userRepo  repository.UserRepository
 	feedCache *cache.FeedCache
 	bus       event.EventPublisher
+	assembler *AuthorAssembler
 }
 
 // NewPostService constructs a PostService.
@@ -88,17 +99,23 @@ type PostService struct {
 // Dependencies are injected (not constructed inside) so tests can swap in
 // fakes and so the same instance is shared across goroutines without a
 // per-request constructor cost. Standard wiring pattern in this codebase.
+//
+// Step 7: takes an *AuthorAssembler so feed/author-page list assembly shares
+// one implementation with the search module. userRepo is still held for
+// loadAuthor-free direct needs and for symmetry with the original wiring.
 func NewPostService(
 	postRepo repository.PostRepository,
 	userRepo repository.UserRepository,
 	feedCache *cache.FeedCache,
 	bus event.EventPublisher,
+	assembler *AuthorAssembler,
 ) *PostService {
 	return &PostService{
 		postRepo:  postRepo,
 		userRepo:  userRepo,
 		feedCache: feedCache,
 		bus:       bus,
+		assembler: assembler,
 	}
 }
 
@@ -192,7 +209,7 @@ func (s *PostService) GetDetail(ctx context.Context, postID, viewerID int64, vie
 		return nil, errcode.ErrPostNotFound
 	}
 
-	author, err := s.loadAuthor(ctx, p.UserID)
+	author, err := s.assembler.LoadOne(ctx, p.UserID)
 	if err != nil {
 		return nil, err
 	}
@@ -298,7 +315,7 @@ func (s *PostService) ListByUser(ctx context.Context, authorID int64, cursor str
 	// One author for the entire page → one user lookup, not N.
 	var author *model.User
 	if len(posts) > 0 {
-		a, lerr := s.loadAuthor(ctx, authorID)
+		a, lerr := s.assembler.LoadOne(ctx, authorID)
 		if lerr != nil {
 			return nil, lerr
 		}
@@ -307,7 +324,7 @@ func (s *PostService) ListByUser(ctx context.Context, authorID int64, cursor str
 
 	items := make([]dto.PostListItem, 0, len(posts))
 	for _, p := range posts {
-		items = append(items, s.toListItem(p, author))
+		items = append(items, BuildListItem(p, author))
 	}
 
 	return &dto.FeedResp{
@@ -405,66 +422,27 @@ func (s *PostService) recordPV(ctx context.Context, postID, viewerID int64, view
 	}
 }
 
-// loadAuthor returns the post's author, or a "deleted user" placeholder if
-// the author was soft-deleted. Returns a hard error only on real DB failure.
-//
-// Returning a placeholder rather than 404'ing the post matches PRD design:
-// "孤立内容由 PVConsumer 负责跳过显示作者" — content survives author
-// deletion so existing readers don't lose context.
-func (s *PostService) loadAuthor(ctx context.Context, userID int64) (*model.User, error) {
-	u, err := s.userRepo.FindByID(ctx, userID)
-	if err != nil {
-		if errors.Is(err, repository.ErrUserNotFound) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("find author: %w", err)
-	}
-	return u, nil
-}
-
 // assembleFeed converts a []*model.Post into a FeedResp with author
-// snapshots embedded. Performs N+1 author loads — see file header for
-// the deferred batch-load improvement.
+// snapshots embedded. Delegates author loading + list-item building to the
+// shared AuthorAssembler (Step 7). Performs N+1 author loads — see file
+// header for the deferred batch-load improvement.
 func (s *PostService) assembleFeed(ctx context.Context, posts []*model.Post, size int) (*dto.FeedResp, error) {
-	authorMap := make(map[int64]*model.User, len(posts))
-	for _, uid := range uniqueAuthorIDs(posts) {
-		u, err := s.loadAuthor(ctx, uid)
-		if err != nil {
-			return nil, err
-		}
-		// nil u (deleted user) is also stored — toListItem handles nil.
-		authorMap[uid] = u
-	}
-
-	items := make([]dto.PostListItem, 0, len(posts))
-	for _, p := range posts {
-		items = append(items, s.toListItem(p, authorMap[p.UserID]))
+	authorMap, err := s.assembler.LoadMap(ctx, posts)
+	if err != nil {
+		return nil, err
 	}
 
 	return &dto.FeedResp{
-		Posts:      items,
+		Posts:      BuildListItems(posts, authorMap),
 		NextCursor: nextCursorOf(posts, size),
 		HasMore:    len(posts) >= size,
 	}, nil
 }
 
-// toListItem converts model+author to the wire DTO. nil author is rendered
-// as a "deleted user" placeholder (see loadAuthor doc).
-func (s *PostService) toListItem(p *model.Post, author *model.User) dto.PostListItem {
-	item := dto.PostListItem{
-		ID:        p.ID,
-		Title:     p.Title,
-		SceneTag:  int8(p.SceneTag),
-		SceneName: p.SceneTag.Name(),
-		CoverURL:  p.CoverURL,
-		LikeCount: p.LikeCount,
-		ViewCount: p.ViewCount,
-		CreatedAt: p.CreatedAt.UnixMilli(),
-	}
-	item.Author = makeAuthorBrief(p.UserID, author)
-	return item
-}
-
+// toDetailResp builds the post-detail wire DTO. Kept local to PostService
+// (not moved to AuthorAssembler) because the detail shape — Content,
+// AuditStatus, UpdatedAt — is specific to GET /posts/:id and not shared
+// with the search or feed list paths.
 func (s *PostService) toDetailResp(p *model.Post, author *model.User) *dto.PostDetailResp {
 	return &dto.PostDetailResp{
 		ID:          p.ID,
@@ -475,42 +453,12 @@ func (s *PostService) toDetailResp(p *model.Post, author *model.User) *dto.PostD
 		CoverURL:    p.CoverURL,
 		LikeCount:   p.LikeCount,
 		ViewCount:   p.ViewCount,
-		Author:      makeAuthorBrief(p.UserID, author),
+		Author:      BuildAuthorBrief(p.UserID, author),
 		AuditStatus: p.AuditStatus,
 		IsVisible:   p.IsVisible,
 		CreatedAt:   p.CreatedAt.UnixMilli(),
 		UpdatedAt:   p.UpdatedAt.UnixMilli(),
 	}
-}
-
-// makeAuthorBrief renders the author DTO, with a placeholder for deleted users.
-func makeAuthorBrief(authorID int64, u *model.User) dto.PostAuthorBrief {
-	if u != nil {
-		return dto.PostAuthorBrief{
-			ID:        u.ID,
-			Nickname:  u.Nickname,
-			AvatarURL: u.AvatarURL,
-		}
-	}
-	return dto.PostAuthorBrief{
-		ID:       authorID,
-		Nickname: "（用户已注销）",
-	}
-}
-
-// uniqueAuthorIDs preserves first-appearance order while deduplicating.
-// Order preservation is a courtesy for log readability — set semantics
-// would suffice for correctness.
-func uniqueAuthorIDs(posts []*model.Post) []int64 {
-	seen := make(map[int64]struct{}, len(posts))
-	out := make([]int64, 0, len(posts))
-	for _, p := range posts {
-		if _, ok := seen[p.UserID]; !ok {
-			seen[p.UserID] = struct{}{}
-			out = append(out, p.UserID)
-		}
-	}
-	return out
 }
 
 // parseCursor converts the wire-string cursor into a time.Time.
@@ -550,7 +498,8 @@ func nextCursorOf(posts []*model.Post, size int) string {
 	return strconv.FormatInt(last.CreatedAt.UnixMilli(), 10)
 }
 
-// normaliseSize clamps page size to [1, 50] with default 20.
+// normaliseSize clamps page size to [1, 50] with default 20. Shared with
+// SearchService (search_service.go) — both modules use the same paging policy.
 func normaliseSize(size int) int {
 	switch {
 	case size <= 0:

@@ -79,3 +79,18 @@ var (
 	ErrPageSizeInvalid = New(http.StatusBadRequest, 412107, "page size must be between 1 and 50")
 	ErrContentTooLong  = New(http.StatusBadRequest, 412108, "content exceeds 5000 characters")
 )
+
+// ── Search Module (4xx, code segment 450xxx) ───────────────────────────────
+// [Step 7] Defined alongside full-text keyword search.
+//
+// Numbering note: this module takes the full 450xxx block. Steps 3-4 used a
+// tighter 41Zxxx layout (user=410, post=412, 411 reserved) which crowded
+// modules together. From Step 7 on, each new module owns a clean 4MM xxx
+// block — search=450, follow=440, upload=460, audit=470 — so segments never
+// collide and the allocation is obvious. The 41x↔45x width inconsistency
+// with the earlier modules is a known cosmetic debt, to be reconciled in
+// Step 12's error-code consolidation. Numbering scheme stays XYYZZZ.
+var (
+	ErrSearchKeywordEmpty  = New(http.StatusBadRequest, 450101, "search keyword cannot be empty")
+	ErrSearchCursorInvalid = New(http.StatusBadRequest, 450102, "invalid search cursor")
+)
