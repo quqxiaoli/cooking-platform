@@ -11,6 +11,7 @@
 //  7. User module wiring                    (Step 3)
 //     7.5  Post module wiring                    (Step 4)
 //     7.6  Like module + Consumer wiring + StartAll  (Step 5)
+//     7.7  Search module wiring
 //  8. Custom validator registration         (Step 3)
 //  9. gin.SetMode + setupRouter
 //  10. HTTP server start
@@ -133,7 +134,12 @@ func main() {
 	// which are wired separately at stage 7.6.
 	postRepo := repository.NewPostRepository(db)
 	feedCache := cache.NewFeedCache(rdb)
-	postSvc := service.NewPostService(postRepo, userRepo, feedCache, bus)
+	// [Step 7] AuthorAssembler is shared by PostService (feed / author-page)
+	// and SearchService — single source of truth for author-snapshot
+	// assembly. Constructed here, before PostService, because PostService
+	// now depends on it.
+	authorAssembler := service.NewAuthorAssembler(userRepo)
+	postSvc := service.NewPostService(postRepo, userRepo, feedCache, bus, authorAssembler)
 	postHandler := handler.NewPostHandler(postSvc)
 	feedHandler := handler.NewFeedHandler(postSvc)
 	log.Info("post module wired")
@@ -158,6 +164,15 @@ func main() {
 	consumerMgr.Register(consumer.NewPVConsumer(bus, db))
 	consumerMgr.Register(consumer.NewCountConsumer(bus, db))
 	consumerMgr.StartAll()
+	// ── 7.7 [Step 7] Search module wiring ─────────────────────────────────────
+	// Order: repo → service → handler. SearchService reuses authorAssembler
+	// (built at stage 7.5) so search results and feed cards share one
+	// author-snapshot implementation. No consumer, no cache: search is a
+	// pure synchronous read path.
+	searchRepo := repository.NewSearchRepository(db)
+	searchSvc := service.NewSearchService(searchRepo, authorAssembler)
+	searchHandler := handler.NewSearchHandler(searchSvc)
+	log.Info("search module wired")
 
 	// ── 8. Custom validator registration ──────────────────────────────────────
 	// Must run BEFORE setupRouter so any DTO using `binding:"phone"` works.
@@ -168,7 +183,7 @@ func main() {
 
 	// ── 9. Gin engine ─────────────────────────────────────────────────────────
 	gin.SetMode(cfg.Server.Mode)
-	engine := setupRouter(db, rdb, userSvc, userHandler, postHandler, feedHandler, likeHandler)
+	engine := setupRouter(db, rdb, userSvc, userHandler, postHandler, feedHandler, likeHandler, searchHandler)
 
 	// ── 10. HTTP server ───────────────────────────────────────────────────────
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
@@ -257,6 +272,7 @@ func setupRouter(
 	postHandler *handler.PostHandler,
 	feedHandler *handler.FeedHandler,
 	likeHandler *handler.LikeHandler,
+	searchHandler *handler.SearchHandler,
 ) *gin.Engine {
 	r := gin.New()
 
@@ -363,13 +379,34 @@ func setupRouter(
 		)
 	}
 
-	// [Step 4] Feed routes — public.
+	/// [Step 4] Feed routes — public.
 	feedGroup := v1.Group("/feed")
 	{
 		feedGroup.GET("", feedHandler.ListFeed)
 	}
 
+	// [Step 7] Search route — public (PRD §7 F-S01 AC-6: no auth required).
+	//
+	// Rate-limited per IP, not per user: search has no auth context, and
+	// the abuse vector is scraping (one client hammering the FULLTEXT
+	// query). PerIPKey + the existing sliding-window middleware covers it
+	// with zero new limiter code. limit:search:{ip}, 30 req / 60s — well
+	// above any human search cadence, low enough to blunt a scraper.
+	searchGroup := v1.Group("/search")
+	{
+		searchGroup.GET("",
+			middleware.RateLimit(middleware.RateLimitConfig{
+				RDB:     rdb,
+				KeyFunc: middleware.PerIPKey("limit:search"),
+				Limit:   30,
+				Window:  60 * time.Second,
+			}),
+			searchHandler.Search,
+		)
+	}
+
 	return r
+
 }
 
 // initMySQL is unchanged from Step 1.
