@@ -174,6 +174,19 @@ func main() {
 	searchHandler := handler.NewSearchHandler(searchSvc)
 	log.Info("search module wired")
 
+	// ── 7.8 [Step 8] Follow module wiring ─────────────────────────────────────
+	// Order: repo → service → handler. FollowService writes the follows table
+	// synchronously (low-frequency action, no batching needed — see Step 8
+	// ADR) and publishes Follow/UnfollowEvent via the EventPublisher side of
+	// `bus`. The redundant users.follower_count / following_count counters are
+	// maintained by CountConsumer, which was extended in this step to also
+	// subscribe TopicFollow / TopicUnfollow — no new consumer is registered
+	// here; the existing CountConsumer (registered at 7.6) now covers it.
+	followRepo := repository.NewFollowRepository(db)
+	followSvc := service.NewFollowService(followRepo, userRepo, bus)
+	followHandler := handler.NewFollowHandler(followSvc)
+	log.Info("follow module wired")
+
 	// ── 8. Custom validator registration ──────────────────────────────────────
 	// Must run BEFORE setupRouter so any DTO using `binding:"phone"` works.
 	if err := customvalidator.Register(); err != nil {
@@ -183,7 +196,7 @@ func main() {
 
 	// ── 9. Gin engine ─────────────────────────────────────────────────────────
 	gin.SetMode(cfg.Server.Mode)
-	engine := setupRouter(db, rdb, userSvc, userHandler, postHandler, feedHandler, likeHandler, searchHandler)
+	engine := setupRouter(db, rdb, userSvc, userHandler, postHandler, feedHandler, likeHandler, searchHandler, followHandler)
 
 	// ── 10. HTTP server ───────────────────────────────────────────────────────
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
@@ -273,6 +286,7 @@ func setupRouter(
 	feedHandler *handler.FeedHandler,
 	likeHandler *handler.LikeHandler,
 	searchHandler *handler.SearchHandler,
+	followHandler *handler.FollowHandler,
 ) *gin.Engine {
 	r := gin.New()
 
@@ -302,17 +316,33 @@ func setupRouter(
 		authGroup.POST("/logout", middleware.Auth(userSvc), userHandler.Logout)
 	}
 
-	// [Step 3+4] User routes — mixed visibility.
+	// [Step 3+4+8] User routes — mixed visibility.
 	userGroup := v1.Group("/users")
 	{
 		// Public — anyone can view a user's public profile.
 		userGroup.GET("/:id", userHandler.GetPublicProfile)
 
 		// [Step 4] Public — author timeline (cursor-paginated).
-		// Note: this lives under /users/:id/ rather than /feed?author=:id
-		// to mirror the PRD-Phase3 §7.1 follow-route style
-		// (/users/:id/followers, /users/:id/following).
 		userGroup.GET("/:id/posts", feedHandler.ListByUser)
+
+		// [Step 8] Follow resource on a user.
+		//   POST   /users/:id/follow      → follow   (auth required — the
+		//                                   follow is attributed to the
+		//                                   authenticated caller; PRD §8
+		//                                   AC-2: anon tap → login prompt)
+		//   DELETE /users/:id/follow      → unfollow (auth required)
+		//   GET    /users/:id/followers   → 粉丝列表  (public, cursor-paginated)
+		//   GET    /users/:id/following   → 关注列表  (public, cursor-paginated)
+		//
+		// The follower/following lists are public for the same reason
+		// /users/:id/posts is: viewing a profile must not require login.
+		// Follow / unfollow are NOT rate-limited — unlike like POST, the
+		// abuse vector is weak (the 3000-follow cap in FollowService is the
+		// real guard) and a limiter would just slow legitimate use.
+		userGroup.POST("/:id/follow", middleware.Auth(userSvc), followHandler.Follow)
+		userGroup.DELETE("/:id/follow", middleware.Auth(userSvc), followHandler.Unfollow)
+		userGroup.GET("/:id/followers", followHandler.ListFollowers)
+		userGroup.GET("/:id/following", followHandler.ListFollowing)
 
 		// Protected — current user only.
 		meGroup := userGroup.Group("/me", middleware.Auth(userSvc))
@@ -321,7 +351,6 @@ func setupRouter(
 			meGroup.PATCH("", userHandler.UpdateProfile)
 		}
 	}
-
 	// [Step 4+5] Post routes — write requires auth + rate limit; reads are public.
 	//
 	// Rate-limit policy: limit:pub:{user_id}, 20 posts per 24h, sliding window.

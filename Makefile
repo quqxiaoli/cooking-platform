@@ -127,7 +127,10 @@ docker-ps:
 # and the dev docker stack (cooking-mysql-dev / cooking-redis-dev) up.
 verify-step7:
 	bash scripts/verify_step7.sh
-	
+
+.PHONY: verify-step8
+verify-step8: ## 运行 Step 8 关注模块端到端验证
+	@bash scripts/verify_step8.sh	
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 ## clean: remove build artefacts
 clean:
