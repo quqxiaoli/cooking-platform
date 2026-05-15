@@ -136,6 +136,18 @@ verify-step8: ## 运行 Step 8 关注模块端到端验证
 verify-step9: ## 运行 Step 9 图片上传模块端到端验证
 	@bash scripts/verify_step9.sh
 
+# ── Step Management (v4 工作流) ───────────────────────────────────────────────
+## step-diff N=10: 生成本步代码变更清单脚手架（基于 git diff step-N-1-done..HEAD）
+.PHONY: step-diff
+step-diff:
+	@if [ -z "$(N)" ]; then echo "ERROR: N required. Usage: make step-diff N=10"; exit 1; fi
+	@bash scripts/gen_step_diff.sh $(N)
+
+## step-closeout N=10: 收尾自检（敏感信息扫描 + 验证脚本 + commit message 模板）
+.PHONY: step-closeout
+step-closeout:
+	@if [ -z "$(N)" ]; then echo "ERROR: N required. Usage: make step-closeout N=10"; exit 1; fi
+	-@bash scripts/step_closeout.sh $(N)
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 ## clean: remove build artefacts
 clean:
