@@ -57,6 +57,23 @@ sms:
   code_length: 6
   code_ttl: 5m
 
+# [Step 9] OSS provider configuration.
+# Dev uses 'mock' — pkg/oss/mock.go starts an embedded HTTP listener on
+# mock_listen_addr that accepts PUT /<object_key>, so verify_step9.sh can run
+# the full presign → real PUT → callback chain locally without Aliyun.
+# url_prefix MUST point at the mock listener for the whitelist check to pass.
+oss:
+  provider: mock                              # mock | aliyun
+  access_key_id: ""                           # ignored by mock
+  access_key_secret: ""                       # ignored by mock
+  endpoint: ""                                # ignored by mock
+  bucket: cooking-dev
+  url_prefix: "http://127.0.0.1:18080/"       # MUST equal mock_listen_addr URL
+  presign_ttl: 15m
+  max_image_size: 5242880                     # 5 MiB
+  upload_hourly: 30                           # per-user presign rate cap
+  mock_listen_addr: "127.0.0.1:18080"
+
 # [Step 3] Rate-limit configuration.
 # Three-dimension SMS protection (enforced in internal/service/user_service.go):
 #   - sms_phone_window: minimum interval between two send-code requests for the same phone

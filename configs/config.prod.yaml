@@ -55,11 +55,24 @@ sms:
   code_length: 6
   code_ttl: 5m
 
+# [Step 9] Production uses real Aliyun OSS.
+# access_key_id and access_key_secret come from env:
+#   APP_OSS_ACCESS_KEY_ID and APP_OSS_ACCESS_KEY_SECRET.
+# Bucket and URL prefix must match — frontend builds image URLs by prefixing
+# url_prefix to the object_key returned in the upload callback.
+oss:
+  provider: aliyun
+  access_key_id: "<OSS_ACCESS_KEY_ID>"
+  access_key_secret: "<OSS_ACCESS_KEY_SECRET>"
+  endpoint: oss-cn-beijing.aliyuncs.com
+  bucket: cooking-prod
+  url_prefix: "https://cooking-prod.oss-cn-beijing.aliyuncs.com/"
+  presign_ttl: 15m
+  max_image_size: 5242880     # 5 MiB
+  upload_hourly: 30
+  mock_listen_addr: ""        # ignored when provider=aliyun
+
 # [Step 3] Rate-limit configuration.
-# Three-dimension SMS protection (enforced in internal/service/user_service.go):
-#   - sms_phone_window: minimum interval between two send-code requests for the same phone
-#   - sms_per_phone_per_day: max sends to the same phone in 24h
-#   - sms_per_ip_per_day: max sends from the same IP in 24h (IP is SHA-256 hashed before use)
 # Production values match dev — these are UX knobs, not security knobs.
 # Tune after observing real traffic patterns post-launch.
 ratelimit:
