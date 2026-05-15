@@ -20,6 +20,7 @@ type Config struct {
 	JWT       JWTConfig       `mapstructure:"jwt"`
 	MQ        MQConfig        `mapstructure:"mq"`
 	SMS       SMSConfig       `mapstructure:"sms"`       // [Step 3] SMS provider config
+	OSS       OSSConfig       `mapstructure:"oss"`       // [Step 9] OSS provider config
 	Ratelimit RatelimitConfig `mapstructure:"ratelimit"` // [Step 3] generic rate limit knobs
 }
 
@@ -77,9 +78,6 @@ type MQConfig struct {
 //
 // [Step 3] Provider="mock" uses pkg/sms/mock.go (logs the code instead of sending).
 // [Step 10] Provider="aliyun" will use pkg/sms/aliyun.go (real Aliyun SMS API).
-//
-// CodeLength controls how many digits the verification code has (PRD-Phase2: 6).
-// CodeTTL controls how long the code is valid in Redis after being sent.
 type SMSConfig struct {
 	Provider     string        `mapstructure:"provider"`      // mock | aliyun
 	SignName     string        `mapstructure:"sign_name"`     // Aliyun signature, ignored by mock
@@ -88,13 +86,32 @@ type SMSConfig struct {
 	CodeTTL      time.Duration `mapstructure:"code_ttl"`      // default 5m
 }
 
+// OSSConfig drives the OSS client factory (added in Step 9).
+//
+// Provider="mock" spins up a local HTTP listener so verify_step9.sh can run
+// the full presign → real PUT → callback chain in dev without Aliyun.
+// Provider="aliyun" uses the official SDK and signs PUT URLs directly.
+//
+// AccessKeyID / AccessKeySecret are NEVER stored in config.yaml — production
+// reads them from APP_OSS_ACCESS_KEY_ID / APP_OSS_ACCESS_KEY_SECRET env vars
+// injected by docker-compose / Kubernetes secrets.
+type OSSConfig struct {
+	Provider        string        `mapstructure:"provider"`          // mock | aliyun
+	AccessKeyID     string        `mapstructure:"access_key_id"`     // env-injected in prod
+	AccessKeySecret string        `mapstructure:"access_key_secret"` // env-injected in prod
+	Endpoint        string        `mapstructure:"endpoint"`          // oss-cn-beijing.aliyuncs.com
+	Bucket          string        `mapstructure:"bucket"`            // cooking-dev / cooking-prod
+	URLPrefix       string        `mapstructure:"url_prefix"`        // baseline for IsAllowedURL whitelist
+	PresignTTL      time.Duration `mapstructure:"presign_ttl"`       // default 15m
+	MaxImageSize    int64         `mapstructure:"max_image_size"`    // default 5 MiB
+	UploadHourly    int           `mapstructure:"upload_hourly"`     // per-user presign rate cap
+	MockListenAddr  string        `mapstructure:"mock_listen_addr"`  // dev only, e.g. 127.0.0.1:18080
+}
+
 // RatelimitConfig holds knobs that apply to *generic* rate-limit middleware
 // usage across the codebase. SMS-specific three-dimension limits are NOT here
 // — they are encoded in user_service because they cannot be expressed as a
 // single sliding-window rule.
-//
-// SMS-specific knobs (window/per-day/per-IP) live here purely as configurable
-// constants so we can tune them without recompiling.
 type RatelimitConfig struct {
 	SMSPhoneWindow    time.Duration `mapstructure:"sms_phone_window"`      // 60s
 	SMSPerPhonePerDay int           `mapstructure:"sms_per_phone_per_day"` // 5
@@ -179,6 +196,15 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("sms.code_length", 6)
 	v.SetDefault("sms.code_ttl", "5m")
 
+	// [Step 9] OSS defaults — mock provider on 127.0.0.1:18080.
+	v.SetDefault("oss.provider", "mock")
+	v.SetDefault("oss.presign_ttl", "15m")
+	v.SetDefault("oss.max_image_size", 5*1024*1024)
+	v.SetDefault("oss.upload_hourly", 30)
+	v.SetDefault("oss.mock_listen_addr", "127.0.0.1:18080")
+	v.SetDefault("oss.bucket", "cooking-dev")
+	v.SetDefault("oss.url_prefix", "http://127.0.0.1:18080/")
+
 	// [Step 3] Rate-limit defaults — three-dimension SMS protection.
 	v.SetDefault("ratelimit.sms_phone_window", "60s")
 	v.SetDefault("ratelimit.sms_per_phone_per_day", 5)
@@ -221,6 +247,45 @@ func validate(cfg *Config) error {
 	}
 	if cfg.SMS.CodeTTL <= 0 {
 		return fmt.Errorf("sms.code_ttl must be positive")
+	}
+
+	// [Step 9] OSS validation.
+	switch cfg.OSS.Provider {
+	case "mock", "aliyun", "":
+	default:
+		return fmt.Errorf("oss.provider must be 'mock' or 'aliyun', got %q", cfg.OSS.Provider)
+	}
+	if cfg.OSS.URLPrefix == "" {
+		return fmt.Errorf("oss.url_prefix is required (whitelist baseline)")
+	}
+	if cfg.OSS.URLPrefix != strings.ToLower(cfg.OSS.URLPrefix) {
+		// IsAllowedURL lowercases both sides; configured prefix must be
+		// lower-case so that the comparison stays a literal prefix match
+		// for prod-deployment audits.
+		return fmt.Errorf("oss.url_prefix must be lower case, got %q", cfg.OSS.URLPrefix)
+	}
+	if cfg.OSS.PresignTTL <= 0 {
+		return fmt.Errorf("oss.presign_ttl must be positive")
+	}
+	if cfg.OSS.MaxImageSize <= 0 {
+		return fmt.Errorf("oss.max_image_size must be positive")
+	}
+	if cfg.OSS.UploadHourly <= 0 {
+		return fmt.Errorf("oss.upload_hourly must be positive")
+	}
+	if cfg.OSS.Provider == "aliyun" {
+		if cfg.OSS.AccessKeyID == "" || cfg.OSS.AccessKeySecret == "" {
+			return fmt.Errorf("oss.access_key_id and oss.access_key_secret are required when provider=aliyun")
+		}
+		if cfg.OSS.Endpoint == "" {
+			return fmt.Errorf("oss.endpoint is required when provider=aliyun")
+		}
+		if cfg.OSS.Bucket == "" {
+			return fmt.Errorf("oss.bucket is required when provider=aliyun")
+		}
+	}
+	if cfg.OSS.Provider == "mock" && cfg.OSS.MockListenAddr == "" {
+		return fmt.Errorf("oss.mock_listen_addr is required when provider=mock")
 	}
 
 	if cfg.Ratelimit.SMSPhoneWindow <= 0 {

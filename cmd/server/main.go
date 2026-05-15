@@ -11,18 +11,21 @@
 //  7. User module wiring                    (Step 3)
 //     7.5  Post module wiring                    (Step 4)
 //     7.6  Like module + Consumer wiring + StartAll  (Step 5)
-//     7.7  Search module wiring
+//     7.7  Search module wiring                  (Step 7)
+//     7.8  Follow module wiring                  (Step 8)
+//     7.9  Upload module wiring                  (Step 9)
 //  8. Custom validator registration         (Step 3)
 //  9. gin.SetMode + setupRouter
 //  10. HTTP server start
 //  11. Wait for SIGINT/SIGTERM
 //  12. Graceful shutdown (LIFO):
-//     HTTP Server → ConsumerManager → EventBus → Redis → MySQL
+//     HTTP Server → ConsumerManager → OSS Client → EventBus → Redis → MySQL
 //
-// Step 5 added stage 7.6 because consumers depend on the EventBus (stage 5)
-// AND the repositories (stages 7 / 7.5). Putting StartAll at the end of
-// 7.6 — after all Register calls — is mandatory; the empty Manager at
-// stage 6 is just a placeholder so the variable is in scope for shutdown.
+// Step 9 added stage 7.9 because the upload module needs an oss.Client that
+// MockClient backs with an embedded HTTP listener — its lifecycle (start in
+// NewClient, stop in Close) must be managed alongside the other process-wide
+// resources. OSS Client closes BEFORE EventBus so any in-flight upload bytes
+// finish landing before we tear down lower-level services.
 package main
 
 import (
@@ -45,6 +48,7 @@ import (
 	"cooking-platform/pkg/config"
 	jwtpkg "cooking-platform/pkg/jwt"
 	"cooking-platform/pkg/logger"
+	"cooking-platform/pkg/oss"
 	"cooking-platform/pkg/sms"
 	customvalidator "cooking-platform/pkg/validator"
 
@@ -77,6 +81,7 @@ func main() {
 		zap.Int("port", cfg.Server.Port),
 		zap.String("mq_provider", cfg.MQ.Provider),
 		zap.String("sms_provider", cfg.SMS.Provider),
+		zap.String("oss_provider", cfg.OSS.Provider),
 	)
 
 	// ── 3. MySQL ──────────────────────────────────────────────────────────────
@@ -101,15 +106,11 @@ func main() {
 	log.Info("event bus initialized", zap.String("provider", cfg.MQ.Provider))
 
 	// ── 6. ConsumerManager (empty placeholder) ────────────────────────────────
-	// Step 5 change: consumers are registered in stage 7.6 (after their
-	// repository dependencies are constructed), then StartAll is invoked
-	// at the END of 7.6 — not here. We still create the manager up-front
-	// so its variable is captured in the same scope as the shutdown block.
 	consumerMgr := consumer.NewManager()
 
 	// ── 7. [Step 3] User module wiring ────────────────────────────────────────
-	// Order: cache → repo → JWT manager → SMS sender → service → handler.
-	// Each layer depends only on what was constructed before it.
+	// Step 9 change: NewUserService now also takes cfg.OSS so UpdateProfile
+	// can enforce the OSS whitelist on avatar_url updates.
 	userCache := cache.NewUserCache(rdb)
 	userRepo := repository.NewUserRepository(db)
 	jwtMgr := jwtpkg.NewManager(cfg.JWT)
@@ -120,40 +121,24 @@ func main() {
 	}
 	log.Info("sms sender initialized", zap.String("provider", cfg.SMS.Provider))
 
-	userSvc := service.NewUserService(userRepo, userCache, jwtMgr, smsSender, cfg.SMS, cfg.Ratelimit)
+	userSvc := service.NewUserService(userRepo, userCache, jwtMgr, smsSender, cfg.SMS, cfg.OSS, cfg.Ratelimit)
 	userHandler := handler.NewUserHandler(userSvc)
 
 	// ── 7.5 [Step 4] Post module wiring ───────────────────────────────────────
-	// Order: cache → repo → service → handler. Each layer depends only on
-	// what was constructed before it. PostService takes the userRepo from
-	// Step 3 to embed author snapshots in feed/detail responses.
-	//
-	// PostService publishes via the EventPublisher interface (not the full
-	// EventBus) so the dependency direction is clean: service emits events,
-	// it does not subscribe to them. Subscription belongs to consumers,
-	// which are wired separately at stage 7.6.
+	// Step 9 change: NewPostService now also takes cfg.OSS so Create can
+	// enforce the OSS whitelist on cover_url + each step's image_urls.
 	postRepo := repository.NewPostRepository(db)
 	feedCache := cache.NewFeedCache(rdb)
 	// [Step 7] AuthorAssembler is shared by PostService (feed / author-page)
 	// and SearchService — single source of truth for author-snapshot
-	// assembly. Constructed here, before PostService, because PostService
-	// now depends on it.
+	// assembly.
 	authorAssembler := service.NewAuthorAssembler(userRepo)
-	postSvc := service.NewPostService(postRepo, userRepo, feedCache, bus, authorAssembler)
+	postSvc := service.NewPostService(postRepo, userRepo, feedCache, bus, authorAssembler, cfg.OSS)
 	postHandler := handler.NewPostHandler(postSvc)
 	feedHandler := handler.NewFeedHandler(postSvc)
 	log.Info("post module wired")
 
 	// ── 7.6 [Step 5] Like module + Consumer wiring ────────────────────────────
-	// Order:
-	//   a. Like module dependencies (cache → repo → service → handler).
-	//   b. Register the THREE consumers (LikeConsumer, PVConsumer, CountConsumer)
-	//      with the manager. They all need the EventSubscriber side of `bus`
-	//      and write to the master MySQL via the existing repos / raw SQL.
-	//   c. StartAll: now-and-only-now we boot the consumer goroutines.
-	//      Doing it here (not earlier) ensures every consumer's deps exist;
-	//      doing it BEFORE setupRouter ensures consumers are draining the
-	//      bus before the first HTTP request can publish.
 	likeRepo := repository.NewLikeRepository(db)
 	likeCache := cache.NewLikeCache(rdb)
 	likeSvc := service.NewLikeService(postRepo, likeCache, bus)
@@ -164,31 +149,42 @@ func main() {
 	consumerMgr.Register(consumer.NewPVConsumer(bus, db))
 	consumerMgr.Register(consumer.NewCountConsumer(bus, db))
 	consumerMgr.StartAll()
+
 	// ── 7.7 [Step 7] Search module wiring ─────────────────────────────────────
-	// Order: repo → service → handler. SearchService reuses authorAssembler
-	// (built at stage 7.5) so search results and feed cards share one
-	// author-snapshot implementation. No consumer, no cache: search is a
-	// pure synchronous read path.
 	searchRepo := repository.NewSearchRepository(db)
 	searchSvc := service.NewSearchService(searchRepo, authorAssembler)
 	searchHandler := handler.NewSearchHandler(searchSvc)
 	log.Info("search module wired")
 
 	// ── 7.8 [Step 8] Follow module wiring ─────────────────────────────────────
-	// Order: repo → service → handler. FollowService writes the follows table
-	// synchronously (low-frequency action, no batching needed — see Step 8
-	// ADR) and publishes Follow/UnfollowEvent via the EventPublisher side of
-	// `bus`. The redundant users.follower_count / following_count counters are
-	// maintained by CountConsumer, which was extended in this step to also
-	// subscribe TopicFollow / TopicUnfollow — no new consumer is registered
-	// here; the existing CountConsumer (registered at 7.6) now covers it.
 	followRepo := repository.NewFollowRepository(db)
 	followSvc := service.NewFollowService(followRepo, userRepo, bus)
 	followHandler := handler.NewFollowHandler(followSvc)
 	log.Info("follow module wired")
 
+	// ── 7.9 [Step 9] Upload module wiring ─────────────────────────────────────
+	// Order:
+	//   a. oss.NewClient → MockClient (starts embedded HTTP listener on
+	//      cfg.OSS.MockListenAddr) or AliyunClient (no goroutines).
+	//   b. UploadCache wraps Redis for nonce storage.
+	//   c. UploadService composes (a) + (b) + cfg.OSS.
+	//   d. UploadHandler wraps the service for HTTP routing.
+	//
+	// We deliberately wire upload AFTER the other modules so a misconfigured
+	// OSS section can't break the rest of the boot path — the server still
+	// comes up if upload fails to initialise. But we treat that as fatal
+	// for now: a server without upload is functionally broken for the
+	// Step 9 deliverable. Loosen this when graceful degradation matters.
+	ossClient, err := oss.NewClient(cfg.OSS)
+	if err != nil {
+		log.Fatal("init oss client", zap.Error(err))
+	}
+	uploadCache := cache.NewUploadCache(rdb)
+	uploadSvc := service.NewUploadService(ossClient, uploadCache, cfg.OSS)
+	uploadHandler := handler.NewUploadHandler(uploadSvc)
+	log.Info("upload module wired", zap.String("provider", cfg.OSS.Provider))
+
 	// ── 8. Custom validator registration ──────────────────────────────────────
-	// Must run BEFORE setupRouter so any DTO using `binding:"phone"` works.
 	if err := customvalidator.Register(); err != nil {
 		log.Fatal("register custom validators", zap.Error(err))
 	}
@@ -196,7 +192,7 @@ func main() {
 
 	// ── 9. Gin engine ─────────────────────────────────────────────────────────
 	gin.SetMode(cfg.Server.Mode)
-	engine := setupRouter(db, rdb, userSvc, userHandler, postHandler, feedHandler, likeHandler, searchHandler, followHandler)
+	engine := setupRouter(db, rdb, userSvc, userHandler, postHandler, feedHandler, likeHandler, searchHandler, followHandler, uploadHandler)
 
 	// ── 10. HTTP server ───────────────────────────────────────────────────────
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
@@ -223,10 +219,12 @@ func main() {
 	log.Info("shutdown signal received")
 
 	// ── 12. Graceful shutdown (LIFO order) ────────────────────────────────────
-	// HTTP Server → ConsumerManager → EventBus → Redis → MySQL.
+	// HTTP Server → ConsumerManager → OSS Client → EventBus → Redis → MySQL.
 	//
 	// HTTP first so no new events are published while consumers drain.
-	// Consumer manager next so all in-flight events finish persisting.
+	// Consumers next so all in-flight events finish persisting.
+	// OSS Client then so MockClient's embedded HTTP listener stops accepting
+	// uploads (no behavioural effect on AliyunClient — Close is a no-op there).
 	// EventBus then closes so any latent Publish call returns error
 	// instead of blocking. Finally the infrastructure connections.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -241,6 +239,12 @@ func main() {
 	log.Info("consumer manager shutting down...")
 	consumerMgr.Shutdown()
 	log.Info("consumer manager stopped")
+
+	if err := ossClient.Close(); err != nil {
+		log.Error("oss client close", zap.Error(err))
+	} else {
+		log.Info("oss client closed")
+	}
 
 	if err := bus.Close(); err != nil {
 		log.Error("event bus close", zap.Error(err))
@@ -271,12 +275,7 @@ func main() {
 // service/handler pair as parameters. Keep all routes in this single function
 // so the URL structure of the API is visible at one glance.
 //
-// [Step 3] adds: userSvc (for Auth middleware), userHandler (for v1 routes).
-// [Step 4] adds: postHandler (POST /posts, GET /posts/:id),
-//
-//	feedHandler (GET /feed, GET /users/:id/posts).
-//
-// [Step 5] adds: likeHandler (POST/DELETE/GET /posts/:id/like).
+// [Step 9] adds: uploadHandler (POST /upload/presign, POST /upload/callback).
 func setupRouter(
 	db *gorm.DB,
 	rdb *goredis.Client,
@@ -287,6 +286,7 @@ func setupRouter(
 	likeHandler *handler.LikeHandler,
 	searchHandler *handler.SearchHandler,
 	followHandler *handler.FollowHandler,
+	uploadHandler *handler.UploadHandler,
 ) *gin.Engine {
 	r := gin.New()
 
@@ -312,33 +312,16 @@ func setupRouter(
 		authGroup.POST("/send-code", userHandler.SendCode)
 		authGroup.POST("/login", userHandler.Login)
 		authGroup.POST("/refresh", userHandler.Refresh)
-		// Logout requires a valid token (we need its JTI to blacklist).
 		authGroup.POST("/logout", middleware.Auth(userSvc), userHandler.Logout)
 	}
 
 	// [Step 3+4+8] User routes — mixed visibility.
 	userGroup := v1.Group("/users")
 	{
-		// Public — anyone can view a user's public profile.
 		userGroup.GET("/:id", userHandler.GetPublicProfile)
-
-		// [Step 4] Public — author timeline (cursor-paginated).
 		userGroup.GET("/:id/posts", feedHandler.ListByUser)
 
 		// [Step 8] Follow resource on a user.
-		//   POST   /users/:id/follow      → follow   (auth required — the
-		//                                   follow is attributed to the
-		//                                   authenticated caller; PRD §8
-		//                                   AC-2: anon tap → login prompt)
-		//   DELETE /users/:id/follow      → unfollow (auth required)
-		//   GET    /users/:id/followers   → 粉丝列表  (public, cursor-paginated)
-		//   GET    /users/:id/following   → 关注列表  (public, cursor-paginated)
-		//
-		// The follower/following lists are public for the same reason
-		// /users/:id/posts is: viewing a profile must not require login.
-		// Follow / unfollow are NOT rate-limited — unlike like POST, the
-		// abuse vector is weak (the 3000-follow cap in FollowService is the
-		// real guard) and a limiter would just slow legitimate use.
 		userGroup.POST("/:id/follow", middleware.Auth(userSvc), followHandler.Follow)
 		userGroup.DELETE("/:id/follow", middleware.Auth(userSvc), followHandler.Unfollow)
 		userGroup.GET("/:id/followers", followHandler.ListFollowers)
@@ -351,26 +334,8 @@ func setupRouter(
 			meGroup.PATCH("", userHandler.UpdateProfile)
 		}
 	}
-	// [Step 4+5] Post routes — write requires auth + rate limit; reads are public.
-	//
-	// Rate-limit policy: limit:pub:{user_id}, 20 posts per 24h, sliding window.
-	// PRD-Phase3 §6.3 specifies this cap to deter spam without throttling
-	// reasonable creators (20/day = one every 72 minutes on average).
-	//
-	// The limit is enforced AFTER Auth — chain order matters: an anonymous
-	// request gets a 401 (cheaper) before any Redis trip happens.
-	//
-	// [Step 5] Like routes hang under /posts/:id/like:
-	//   POST   → like        (auth + rate-limit: 200 likes / 24h)
-	//   DELETE → unlike      (auth only — taking back is always allowed)
-	//   GET    → like-status (auth only — answers "have *I* liked this")
-	//
-	// Why like POST is rate-limited but unlike isn't: the abuse vector
-	// is mass-spamming hearts (boosts vanity metrics, triggers fake
-	// notifications). Mass-unliking has no comparable abuse model;
-	// rate-limiting it would just slow legitimate "I changed my mind"
-	// flows. PRD-Phase3 §6.3 sets limit:like at 200/24h, well above
-	// any human use pattern.
+
+	// [Step 4+5] Post routes.
 	postGroup := v1.Group("/posts")
 	{
 		postGroup.POST("",
@@ -383,11 +348,8 @@ func setupRouter(
 			}),
 			postHandler.Create,
 		)
-		// Detail is public so feed cards (which may include unauth users)
-		// can deep-link into a post without forcing login.
 		postGroup.GET("/:id", postHandler.GetDetail)
 
-		// [Step 5] Like resource on a post.
 		postGroup.POST("/:id/like",
 			middleware.Auth(userSvc),
 			middleware.RateLimit(middleware.RateLimitConfig{
@@ -408,19 +370,13 @@ func setupRouter(
 		)
 	}
 
-	/// [Step 4] Feed routes — public.
+	// [Step 4] Feed routes — public.
 	feedGroup := v1.Group("/feed")
 	{
 		feedGroup.GET("", feedHandler.ListFeed)
 	}
 
-	// [Step 7] Search route — public (PRD §7 F-S01 AC-6: no auth required).
-	//
-	// Rate-limited per IP, not per user: search has no auth context, and
-	// the abuse vector is scraping (one client hammering the FULLTEXT
-	// query). PerIPKey + the existing sliding-window middleware covers it
-	// with zero new limiter code. limit:search:{ip}, 30 req / 60s — well
-	// above any human search cadence, low enough to blunt a scraper.
+	// [Step 7] Search route — public.
 	searchGroup := v1.Group("/search")
 	{
 		searchGroup.GET("",
@@ -434,8 +390,28 @@ func setupRouter(
 		)
 	}
 
-	return r
+	// [Step 9] Upload routes — auth required, rate-limited per user.
+	//
+	// /presign is rate-limited (30 req/hour per user) — a hostile client
+	// could otherwise flood OSS with presigned URLs. /callback is NOT
+	// rate-limited: it's already gated by single-use nonce + ownership
+	// check, and a callback corresponds to an upload the user already
+	// PUT, so abuse would just delete their own nonces.
+	uploadGroup := v1.Group("/upload", middleware.Auth(userSvc))
+	{
+		uploadGroup.POST("/presign",
+			middleware.RateLimit(middleware.RateLimitConfig{
+				RDB:     rdb,
+				KeyFunc: middleware.PerUserKey("limit:upload"),
+				Limit:   30,
+				Window:  time.Hour,
+			}),
+			uploadHandler.Presign,
+		)
+		uploadGroup.POST("/callback", uploadHandler.Callback)
+	}
 
+	return r
 }
 
 // initMySQL is unchanged from Step 1.

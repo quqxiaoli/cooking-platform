@@ -130,7 +130,12 @@ verify-step7:
 
 .PHONY: verify-step8
 verify-step8: ## 运行 Step 8 关注模块端到端验证
-	@bash scripts/verify_step8.sh	
+	@bash scripts/verify_step8.sh
+
+.PHONY: verify-step9
+verify-step9: ## 运行 Step 9 图片上传模块端到端验证
+	@bash scripts/verify_step9.sh
+
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 ## clean: remove build artefacts
 clean:

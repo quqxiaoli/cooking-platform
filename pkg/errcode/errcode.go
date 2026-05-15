@@ -98,11 +98,6 @@ var (
 // ── Follow Module (4xx, code segment 440xxx) ───────────────────────────────
 // [Step 8] Defined alongside follow / unfollow / follower-list / following-list.
 //
-// Numbering: follow module owns the full 440xxx block, per the "each new
-// module owns a clean 4MMxxx block" convention adopted from Step 7
-// (search=450, follow=440, upload=460, audit=470). Numbering scheme is the
-// file-header XYYZZZ.
-//
 // Reused codes (NOT redefined here):
 //   - target user does not exist → 410108 ErrUserNotFound
 //   - caller not logged in       → 401001 ErrUnauthorized (middleware.Auth)
@@ -111,4 +106,28 @@ var (
 	ErrFollowLimitExceeded = New(http.StatusBadRequest, 440102, "following limit reached (max 3000)")
 	ErrFollowNotFound      = New(http.StatusNotFound, 440103, "follow relationship not found")
 	ErrFollowCursorInvalid = New(http.StatusBadRequest, 440104, "invalid follow list cursor")
+)
+
+// ── Upload Module (4xx, code segment 460xxx) ───────────────────────────────
+// [Step 9] Defined alongside OSS presign / callback and the image fields
+// they unlock on user profiles and posts.
+//
+// Numbering: upload module owns the full 460xxx block, per the "each new
+// module owns a clean 4MMxxx block" convention adopted from Step 7.
+//
+// Reused codes (NOT redefined here):
+//   - caller not logged in → 401001 ErrUnauthorized (middleware.Auth)
+//   - global rate limit    → 429001 ErrTooManyReq   (middleware.RateLimit)
+//   - avatar URL parse fail on UpdateProfile path  → 410112 ErrAvatarURLInvalid
+//     is reused when the supplied
+//     string is otherwise malformed;
+//     460105 is used when the URL
+//     is parseable but off-host.
+var (
+	ErrUploadFileType        = New(http.StatusBadRequest, 460101, "unsupported file type")
+	ErrUploadFileTooLarge    = New(http.StatusBadRequest, 460102, "file exceeds size limit")
+	ErrUploadPresignFailed   = New(http.StatusInternalServerError, 460103, "failed to generate presigned url")
+	ErrUploadCallbackInvalid = New(http.StatusBadRequest, 460104, "invalid callback nonce")
+	ErrUploadURLNotAllowed   = New(http.StatusBadRequest, 460105, "url not in oss whitelist")
+	ErrPostStepsInvalid      = New(http.StatusBadRequest, 460106, "post steps invalid")
 )
