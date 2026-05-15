@@ -1,59 +1,77 @@
 // Package consumer — count_consumer.go consumes TopicPost + TopicLike +
-// TopicUnlike events and maintains the redundant counters on the users table:
+// TopicUnlike + TopicFollow + TopicUnfollow events and maintains the
+// redundant counters on the users table:
 //
-//	users.post_count    — incremented on every TopicPost event
-//	users.total_likes   — incremented on TopicLike, decremented on TopicUnlike
+//	users.post_count       — incremented on every TopicPost event
+//	users.total_likes      — incremented on TopicLike, decremented on TopicUnlike
+//	users.following_count  — incremented/decremented on TopicFollow/TopicUnfollow
+//	                         (for the FollowerID — "how many I follow")
+//	users.follower_count   — incremented/decremented on TopicFollow/TopicUnfollow
+//	                         (for the FollowingID — "how many follow me")
 //
-// ── Why combine three topics into one consumer ─────────────────────────────
+// ── Why combine five topics into one consumer ──────────────────────────────
 //
-// All three topics produce the same kind of mutation: an UPDATE to a single
+// All five topics produce the same kind of mutation: an UPDATE to a single
 // users row by a single column +1 / -1 delta. Co-locating them lets us:
 //
 //   - Aggregate cross-topic deltas for the same user into ONE UPDATE.
-//     A user posts (post_count+1) and gets liked (total_likes+1) within
-//     the same flush window → one `UPDATE users SET post_count=post_count+1,
-//     total_likes=total_likes+1 WHERE id=?` instead of two round-trips.
+//     A user posts (post_count+1) and gets a new follower (follower_count+1)
+//     within the same flush window → one combined UPDATE instead of two
+//     round-trips.
 //
 //   - Keep the connection-pool pressure from "user counter sync" bounded
-//     to a single goroutine's outflow. With three separate consumers the
-//     same hot user could see three concurrent UPDATEs and contend on the
-//     row-level lock.
+//     to a single goroutine's outflow. With separate consumers the same hot
+//     user could see concurrent UPDATEs and contend on the row-level lock.
 //
-// ── Why TopicPost goes here, not back to PostService ────────────────────────
+// ── Why TopicPost / TopicFollow go here, not back to their services ────────
 //
-// PostService publishes PostEvent on Create() but does NOT update
-// users.post_count synchronously — that would force every Create to
-// touch two tables in one transaction (cross-table writes are exactly
-// what the EventBus exists to avoid). CountConsumer is the home for all
-// "redundant counter" maintenance, regardless of which event triggers it.
+// PostService publishes PostEvent on Create() and FollowService publishes
+// Follow/UnfollowEvent — but neither updates the users counters
+// synchronously. That would force every Create / Follow to touch two tables
+// in one transaction (cross-table writes are exactly what the EventBus
+// exists to avoid). CountConsumer is the single home for all "redundant
+// counter" maintenance, regardless of which event triggers it.
 //
-// ── Why GREATEST(0, ...) on total_likes decrement ─────────────────────────
+// ── Why one FollowEvent produces TWO countDeltas ───────────────────────────
 //
-// users.total_likes is INT UNSIGNED. Subtraction can underflow if a
-// duplicate UnlikeEvent slips through (Channel mode shouldn't, but
-// RabbitMQ at-least-once will). GREATEST(0, ...) clamps to zero —
-// see like_repository.go's identical defense for the rationale.
+// A follow edge changes two users' counters at once: the follower's
+// following_count and the followee's follower_count. The TopicFollow
+// subscribe goroutine therefore emits two countDelta values per event (and
+// TopicUnfollow likewise, with -1). They flow through the same channel and
+// aggregation as every other delta — no special-casing in flushLoop.
+//
+// ── Why GREATEST(0, ...) on every decrementable column ─────────────────────
+//
+// total_likes / follower_count / following_count are INT UNSIGNED.
+// Subtraction can underflow if a duplicate Unlike/Unfollow event slips
+// through (Channel mode shouldn't, but RabbitMQ at-least-once will).
+// GREATEST(0, CAST(... AS SIGNED) + ?) clamps to zero — see
+// like_repository.go's identical defense for the rationale. post_count is
+// append-only (no event ever decrements it) so it needs no clamp.
 //
 // ── Batch sizing ───────────────────────────────────────────────────────────
 //
 // PRD-Phase3 §3.4: 20 events / 10s. Smaller than LikeConsumer because
-// CountConsumer's writes hit the users table, which is also the auth
-// hot path; we'd rather not stall login throughput with long batched
-// UPDATEs. 20 events fan out to at most 20 distinct users per flush,
-// well within MySQL's tolerance for a brief burst.
+// CountConsumer's writes hit the users table, which is also the auth hot
+// path; we'd rather not stall login throughput with long batched UPDATEs.
+// Note one follow/unfollow event counts as two countDeltas toward the
+// batch, so a burst of follows fills the batch twice as fast — intended,
+// it keeps the per-flush user fan-out bounded.
 //
 // ── Graceful shutdown ──────────────────────────────────────────────────────
 //
-// Three subscribe goroutines (one per topic) share a single internal
-// channel of countDelta values. flushLoop drains on ctx cancel — the
-// pattern is identical to LikeConsumer / PVConsumer.
+// Five subscribe goroutines (one per topic) share a single internal channel
+// of countDelta values. flushLoop drains on ctx cancel — the pattern is
+// identical to LikeConsumer / PVConsumer.
 //
-// Added in Step 5 (like module).
+// Added in Step 5 (like module). Extended in Step 8 (follow module) to also
+// consume TopicFollow / TopicUnfollow.
 package consumer
 
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"time"
 
@@ -69,17 +87,23 @@ const (
 	countChannelBuf    = countBatchSize * 4
 )
 
-// countDelta is the in-memory shape used to ferry events from the
-// subscribe goroutines to the batch loop. We only need the user_id
-// being mutated and the columnar delta — payload-specific fields are
-// already decoded by the subscribe goroutine.
+// countDelta is the in-memory shape used to ferry events from the subscribe
+// goroutines to the batch loop. We only need the user_id being mutated and
+// the per-column delta — payload-specific fields are already decoded by the
+// subscribe goroutine.
+//
+// Each field is the signed delta for one users column. A single event sets
+// exactly one field (a follow/unfollow event produces TWO countDelta values,
+// one per affected user, each setting one field).
 type countDelta struct {
-	userID     int64
-	postCount  int64 // 0 or +1
-	totalLikes int64 // -1, 0, or +1
+	userID         int64
+	postCount      int64 // 0 or +1
+	totalLikes     int64 // -1, 0, or +1
+	followerCount  int64 // -1, 0, or +1
+	followingCount int64 // -1, 0, or +1
 }
 
-// CountConsumer subscribes to three topics and maintains users counters.
+// CountConsumer subscribes to five topics and maintains users counters.
 type CountConsumer struct {
 	bus event.EventSubscriber
 	db  *gorm.DB
@@ -100,7 +124,7 @@ func (c *CountConsumer) Start(ctx context.Context) error {
 	eventCh := make(chan countDelta, countChannelBuf)
 
 	var subWg sync.WaitGroup
-	subWg.Add(3)
+	subWg.Add(5)
 
 	// ── TopicPost → users.post_count +1 ─────────────────────────────────────
 	go func() {
@@ -111,11 +135,7 @@ func (c *CountConsumer) Start(ctx context.Context) error {
 				zap.L().Warn("count consumer: unmarshal PostEvent", zap.Error(err))
 				return nil
 			}
-			select {
-			case eventCh <- countDelta{userID: p.AuthorID, postCount: 1}:
-			case <-ctx.Done():
-				return nil
-			}
+			c.send(ctx, eventCh, countDelta{userID: p.AuthorID, postCount: 1})
 			return nil
 		})
 	}()
@@ -129,11 +149,7 @@ func (c *CountConsumer) Start(ctx context.Context) error {
 				zap.L().Warn("count consumer: unmarshal LikeEvent", zap.Error(err))
 				return nil
 			}
-			select {
-			case eventCh <- countDelta{userID: p.AuthorID, totalLikes: 1}:
-			case <-ctx.Done():
-				return nil
-			}
+			c.send(ctx, eventCh, countDelta{userID: p.AuthorID, totalLikes: 1})
 			return nil
 		})
 	}()
@@ -147,11 +163,38 @@ func (c *CountConsumer) Start(ctx context.Context) error {
 				zap.L().Warn("count consumer: unmarshal UnlikeEvent", zap.Error(err))
 				return nil
 			}
-			select {
-			case eventCh <- countDelta{userID: p.AuthorID, totalLikes: -1}:
-			case <-ctx.Done():
+			c.send(ctx, eventCh, countDelta{userID: p.AuthorID, totalLikes: -1})
+			return nil
+		})
+	}()
+
+	// ── TopicFollow → following_count +1 (follower) & follower_count +1 ────
+	// One follow edge mutates two users, so this handler emits two deltas.
+	go func() {
+		defer subWg.Done()
+		_ = c.bus.Subscribe(ctx, event.TopicFollow, func(_ context.Context, payload []byte) error {
+			var p event.FollowEvent
+			if err := json.Unmarshal(payload, &p); err != nil {
+				zap.L().Warn("count consumer: unmarshal FollowEvent", zap.Error(err))
 				return nil
 			}
+			c.send(ctx, eventCh, countDelta{userID: p.FollowerID, followingCount: 1})
+			c.send(ctx, eventCh, countDelta{userID: p.FollowingID, followerCount: 1})
+			return nil
+		})
+	}()
+
+	// ── TopicUnfollow → following_count -1 (follower) & follower_count -1 ──
+	go func() {
+		defer subWg.Done()
+		_ = c.bus.Subscribe(ctx, event.TopicUnfollow, func(_ context.Context, payload []byte) error {
+			var p event.UnfollowEvent
+			if err := json.Unmarshal(payload, &p); err != nil {
+				zap.L().Warn("count consumer: unmarshal UnfollowEvent", zap.Error(err))
+				return nil
+			}
+			c.send(ctx, eventCh, countDelta{userID: p.FollowerID, followingCount: -1})
+			c.send(ctx, eventCh, countDelta{userID: p.FollowingID, followerCount: -1})
 			return nil
 		})
 	}()
@@ -160,12 +203,25 @@ func (c *CountConsumer) Start(ctx context.Context) error {
 	return nil
 }
 
+// send pushes one delta onto eventCh, honouring ctx cancellation so a
+// subscribe goroutine never blocks forever on a full channel during
+// shutdown. Extracted in Step 8 because the follow handlers each emit two
+// deltas — duplicating the select block four times was noise.
+func (c *CountConsumer) send(ctx context.Context, eventCh chan countDelta, d countDelta) {
+	select {
+	case eventCh <- d:
+	case <-ctx.Done():
+	}
+}
+
 // flushLoop aggregates deltas by user_id and flushes on cap or tick.
 func (c *CountConsumer) flushLoop(ctx context.Context, eventCh chan countDelta, subWg *sync.WaitGroup) {
-	// Two parallel maps so we can compose the UPDATE per user with both
-	// columns set in one statement when both have non-zero deltas.
+	// One map per counter column so the per-user UPDATE can set every
+	// changed column in a single statement.
 	postDeltas := make(map[int64]int64, countBatchSize)
 	likeDeltas := make(map[int64]int64, countBatchSize)
+	followerDeltas := make(map[int64]int64, countBatchSize)
+	followingDeltas := make(map[int64]int64, countBatchSize)
 	bufCount := 0
 
 	ticker := time.NewTicker(countFlushInterval)
@@ -177,9 +233,11 @@ func (c *CountConsumer) flushLoop(ctx context.Context, eventCh chan countDelta, 
 		if bufCount == 0 {
 			return
 		}
-		totalProcessed += c.flush(useCtx, postDeltas, likeDeltas)
+		totalProcessed += c.flush(useCtx, postDeltas, likeDeltas, followerDeltas, followingDeltas)
 		postDeltas = make(map[int64]int64, countBatchSize)
 		likeDeltas = make(map[int64]int64, countBatchSize)
+		followerDeltas = make(map[int64]int64, countBatchSize)
+		followingDeltas = make(map[int64]int64, countBatchSize)
 		bufCount = 0
 	}
 
@@ -189,6 +247,12 @@ func (c *CountConsumer) flushLoop(ctx context.Context, eventCh chan countDelta, 
 		}
 		if d.totalLikes != 0 {
 			likeDeltas[d.userID] += d.totalLikes
+		}
+		if d.followerCount != 0 {
+			followerDeltas[d.userID] += d.followerCount
+		}
+		if d.followingCount != 0 {
+			followingDeltas[d.userID] += d.followingCount
 		}
 		bufCount++
 	}
@@ -226,24 +290,38 @@ func (c *CountConsumer) flushLoop(ctx context.Context, eventCh chan countDelta, 
 
 // flush issues one combined UPDATE per affected user.
 //
-// SQL shape — the most general case (both columns change):
+// SQL shape — the most general case (all four columns change):
 //
 //	UPDATE users
-//	   SET post_count  = post_count  + ?,
-//	       total_likes = GREATEST(0, CAST(total_likes AS SIGNED) + ?)
+//	   SET post_count      = post_count + ?,
+//	       total_likes     = GREATEST(0, CAST(total_likes AS SIGNED) + ?),
+//	       follower_count  = GREATEST(0, CAST(follower_count AS SIGNED) + ?),
+//	       following_count = GREATEST(0, CAST(following_count AS SIGNED) + ?)
 //	 WHERE id = ?
 //
-// When only one column has a non-zero delta we elide the other clause
-// to keep the SQL minimal — micro-optimisation, but reading "UPDATE
-// users SET post_count = ..." in slow logs is more grep-friendly than
-// a SET-everything boilerplate.
-func (c *CountConsumer) flush(ctx context.Context, postDeltas, likeDeltas map[int64]int64) int {
-	// Union of user_ids touched.
-	allUsers := make(map[int64]struct{}, len(postDeltas)+len(likeDeltas))
+// The SET clause is assembled dynamically: only columns with a non-zero
+// delta for that user are included. Step 5 used a hand-written switch over
+// the (post, like) combinations; Step 8's four columns would balloon that
+// to 15 cases, so the switch was replaced with a clause-builder. The
+// substance is unchanged — still one aggregated UPDATE per user, still
+// GREATEST-clamped on every unsigned-decrementable column. Building "UPDATE
+// users SET <only changed columns>" also keeps slow-log lines grep-friendly.
+//
+// post_count is the one column with no GREATEST guard: no event ever emits a
+// negative post delta, so it cannot underflow.
+func (c *CountConsumer) flush(ctx context.Context, postDeltas, likeDeltas, followerDeltas, followingDeltas map[int64]int64) int {
+	// Union of all user_ids touched across the four maps.
+	allUsers := make(map[int64]struct{}, len(postDeltas)+len(likeDeltas)+len(followerDeltas)+len(followingDeltas))
 	for uid := range postDeltas {
 		allUsers[uid] = struct{}{}
 	}
 	for uid := range likeDeltas {
+		allUsers[uid] = struct{}{}
+	}
+	for uid := range followerDeltas {
+		allUsers[uid] = struct{}{}
+	}
+	for uid := range followingDeltas {
 		allUsers[uid] = struct{}{}
 	}
 
@@ -251,44 +329,58 @@ func (c *CountConsumer) flush(ctx context.Context, postDeltas, likeDeltas map[in
 	for uid := range allUsers {
 		pd := postDeltas[uid]
 		ld := likeDeltas[uid]
+		fd := followerDeltas[uid]
+		gd := followingDeltas[uid]
 
-		if pd == 0 && ld == 0 {
+		// setClauses / args are built in lockstep — each appended clause has
+		// exactly one matching placeholder arg, in the same order.
+		setClauses := make([]string, 0, 4)
+		args := make([]any, 0, 5)
+
+		if pd != 0 {
+			// Append-only counter — no clamp needed.
+			setClauses = append(setClauses, "post_count = post_count + ?")
+			args = append(args, pd)
+		}
+		if ld != 0 {
+			setClauses = append(setClauses, "total_likes = GREATEST(0, CAST(total_likes AS SIGNED) + ?)")
+			args = append(args, ld)
+		}
+		if fd != 0 {
+			setClauses = append(setClauses, "follower_count = GREATEST(0, CAST(follower_count AS SIGNED) + ?)")
+			args = append(args, fd)
+		}
+		if gd != 0 {
+			setClauses = append(setClauses, "following_count = GREATEST(0, CAST(following_count AS SIGNED) + ?)")
+			args = append(args, gd)
+		}
+
+		if len(setClauses) == 0 {
 			continue
 		}
 
-		var sql string
-		var args []any
-
-		switch {
-		case pd != 0 && ld != 0:
-			sql = "UPDATE users SET post_count = post_count + ?, " +
-				"total_likes = GREATEST(0, CAST(total_likes AS SIGNED) + ?) WHERE id = ?"
-			args = []any{pd, ld, uid}
-		case pd != 0:
-			sql = "UPDATE users SET post_count = post_count + ? WHERE id = ?"
-			args = []any{pd, uid}
-		case ld != 0:
-			sql = "UPDATE users SET total_likes = GREATEST(0, CAST(total_likes AS SIGNED) + ?) WHERE id = ?"
-			args = []any{ld, uid}
-		}
+		sql := "UPDATE users SET " + strings.Join(setClauses, ", ") + " WHERE id = ?"
+		args = append(args, uid)
 
 		if err := c.db.WithContext(ctx).Exec(sql, args...).Error; err != nil {
 			zap.L().Warn("count consumer: UPDATE users failed",
 				zap.Int64("user_id", uid),
 				zap.Int64("post_delta", pd),
 				zap.Int64("like_delta", ld),
+				zap.Int64("follower_delta", fd),
+				zap.Int64("following_delta", gd),
 				zap.Error(err),
 			)
 			continue
 		}
 		// Count "events handled" — sum of absolute deltas approximates the
-		// real event count, modulo aggregation. Useful for shutdown log.
-		total += int(absInt64(pd) + absInt64(ld))
+		// real event count, modulo aggregation. Useful for the shutdown log.
+		total += int(absInt64(pd) + absInt64(ld) + absInt64(fd) + absInt64(gd))
 	}
 	return total
 }
 
-// absInt64 returns |v|. Math.Abs operates on float64 so this avoids the
+// absInt64 returns |v|. math.Abs operates on float64 so this avoids the
 // round-trip; inlined easily by the compiler.
 func absInt64(v int64) int64 {
 	if v < 0 {

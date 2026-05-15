@@ -7,12 +7,14 @@ import "encoding/json"
 // Topic 用字符串常量，不用 iota int。
 // 原因：RabbitMQ routing key 本身是字符串；日志里可读；Channel map 直接用 string 做 key 无需转换。
 const (
-	TopicLike   = "event.like"
-	TopicUnlike = "event.unlike"
-	TopicPV     = "event.pv"
-	TopicAudit  = "event.audit"
-	TopicCount  = "event.count"
-	TopicPost   = "event.post"
+	TopicLike     = "event.like"
+	TopicUnlike   = "event.unlike"
+	TopicPV       = "event.pv"
+	TopicAudit    = "event.audit"
+	TopicCount    = "event.count"
+	TopicPost     = "event.post"
+	TopicFollow   = "event.follow"   // [Step 8] 关注事件 → CountConsumer 维护双向计数
+	TopicUnfollow = "event.unfollow" // [Step 8] 取消关注事件 → CountConsumer 维护双向计数
 )
 
 // Event 是所有消息的信封结构。
@@ -88,4 +90,34 @@ type PostEvent struct {
 	AuthorID  int64  `json:"author_id"`
 	SceneTag  int8   `json:"scene_tag"`
 	Timestamp int64  `json:"timestamp"`
+}
+
+// FollowEvent 关注事件，由 FollowService.Follow() 在成功写入 follows 表后
+// 发布到 TopicFollow。
+//
+// 一条 FollowEvent 影响两个用户的冗余计数，CountConsumer 消费时拆成两笔：
+//   - FollowerID  的 users.following_count +1（"我关注的人"数）
+//   - FollowingID 的 users.follower_count  +1（"关注我的人"数）
+//
+// follows 表本身已由 FollowService 同步写入（真源），本事件仅驱动 users 表
+// 上的冗余展示计数 —— 丢失一条只造成计数漂移，不影响关注关系本身。
+type FollowEvent struct {
+	EventID     string `json:"event_id"`     // 与外层 Event.ID 一致，Consumer 层幂等用
+	FollowerID  int64  `json:"follower_id"`  // 关注发起者
+	FollowingID int64  `json:"following_id"` // 被关注者
+	Timestamp   int64  `json:"timestamp"`    // UnixMilli
+}
+
+// UnfollowEvent 取消关注事件，由 FollowService.Unfollow() 在成功删除 follows
+// 行后发布到 TopicUnfollow。CountConsumer 消费时拆成两笔 -1：
+//   - FollowerID  的 users.following_count -1
+//   - FollowingID 的 users.follower_count  -1
+//
+// 两笔 -1 均由 CountConsumer 用 GREATEST(0, ...) 钳位，防 unsigned 列下溢
+// （重复投递场景下的兜底，与 like/unlike 的 total_likes 处理一致）。
+type UnfollowEvent struct {
+	EventID     string `json:"event_id"`
+	FollowerID  int64  `json:"follower_id"`
+	FollowingID int64  `json:"following_id"`
+	Timestamp   int64  `json:"timestamp"`
 }

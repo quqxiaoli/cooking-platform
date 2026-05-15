@@ -94,3 +94,21 @@ var (
 	ErrSearchKeywordEmpty  = New(http.StatusBadRequest, 450101, "search keyword cannot be empty")
 	ErrSearchCursorInvalid = New(http.StatusBadRequest, 450102, "invalid search cursor")
 )
+
+// ── Follow Module (4xx, code segment 440xxx) ───────────────────────────────
+// [Step 8] Defined alongside follow / unfollow / follower-list / following-list.
+//
+// Numbering: follow module owns the full 440xxx block, per the "each new
+// module owns a clean 4MMxxx block" convention adopted from Step 7
+// (search=450, follow=440, upload=460, audit=470). Numbering scheme is the
+// file-header XYYZZZ.
+//
+// Reused codes (NOT redefined here):
+//   - target user does not exist → 410108 ErrUserNotFound
+//   - caller not logged in       → 401001 ErrUnauthorized (middleware.Auth)
+var (
+	ErrCannotFollowSelf    = New(http.StatusBadRequest, 440101, "cannot follow yourself")
+	ErrFollowLimitExceeded = New(http.StatusBadRequest, 440102, "following limit reached (max 3000)")
+	ErrFollowNotFound      = New(http.StatusNotFound, 440103, "follow relationship not found")
+	ErrFollowCursorInvalid = New(http.StatusBadRequest, 440104, "invalid follow list cursor")
+)
