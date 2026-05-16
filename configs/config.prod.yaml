@@ -86,6 +86,14 @@ oss:
   upload_hourly: 30
   mock_listen_addr: ""        # ignored when provider=aliyun
 
+# [Step 11] Phone field-level encryption.
+# production MUST inject real secrets via env vars — never commit actual keys.
+# Generate: openssl rand -hex 32  →  phone_key (64 hex chars)
+# Generate: openssl rand -base64 32  →  phone_pepper (arbitrary string)
+encryption:
+  phone_key: "<ENCRYPTION_PHONE_KEY>"       # env: APP_ENCRYPTION_PHONE_KEY
+  phone_pepper: "<ENCRYPTION_PHONE_PEPPER>" # env: APP_ENCRYPTION_PHONE_PEPPER
+
 # [Step 3] Rate-limit configuration.
 # Production values match dev — these are UX knobs, not security knobs.
 # Tune after observing real traffic patterns post-launch.

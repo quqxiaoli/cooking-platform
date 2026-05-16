@@ -86,6 +86,14 @@ oss:
   upload_hourly: 30                           # per-user presign rate cap
   mock_listen_addr: "127.0.0.1:18080"
 
+# [Step 11] Phone field-level encryption.
+# Dev: both fields empty → phone_encrypted stores plaintext, phone_hash = SHA256(phone).
+# Prod: inject real values via APP_ENCRYPTION_PHONE_KEY / APP_ENCRYPTION_PHONE_PEPPER.
+# To generate a dev test key: openssl rand -hex 32
+encryption:
+  phone_key: ""       # 64-char hex = 32-byte AES-256-GCM key; env: APP_ENCRYPTION_PHONE_KEY
+  phone_pepper: ""    # arbitrary secret appended before SHA-256; env: APP_ENCRYPTION_PHONE_PEPPER
+
 # [Step 3] Rate-limit configuration.
 # Three-dimension SMS protection (enforced in internal/service/user_service.go):
 #   - sms_phone_window: minimum interval between two send-code requests for the same phone

@@ -13,16 +13,17 @@ import (
 
 // Config is the root configuration structure.
 type Config struct {
-	Server    ServerConfig    `mapstructure:"server"`
-	Database  DatabaseConfig  `mapstructure:"database"`
-	Redis     RedisConfig     `mapstructure:"redis"`
-	Log       LogConfig       `mapstructure:"log"`
-	JWT       JWTConfig       `mapstructure:"jwt"`
-	MQ        MQConfig        `mapstructure:"mq"`
-	SMS       SMSConfig       `mapstructure:"sms"`       // [Step 3] SMS provider config
-	OSS       OSSConfig       `mapstructure:"oss"`       // [Step 9] OSS provider config
-	Audit     AuditConfig     `mapstructure:"audit"`     // [Step 10] content moderation config
-	Ratelimit RatelimitConfig `mapstructure:"ratelimit"` // [Step 3] generic rate limit knobs
+	Server     ServerConfig     `mapstructure:"server"`
+	Database   DatabaseConfig   `mapstructure:"database"`
+	Redis      RedisConfig      `mapstructure:"redis"`
+	Log        LogConfig        `mapstructure:"log"`
+	JWT        JWTConfig        `mapstructure:"jwt"`
+	MQ         MQConfig         `mapstructure:"mq"`
+	SMS        SMSConfig        `mapstructure:"sms"`        // [Step 3] SMS provider config
+	OSS        OSSConfig        `mapstructure:"oss"`        // [Step 9] OSS provider config
+	Audit      AuditConfig      `mapstructure:"audit"`      // [Step 10] content moderation config
+	Encryption EncryptionConfig `mapstructure:"encryption"` // [Step 11] phone field-level encryption
+	Ratelimit  RatelimitConfig  `mapstructure:"ratelimit"`  // [Step 3] generic rate limit knobs
 }
 
 type ServerConfig struct {
@@ -129,6 +130,25 @@ type AuditConfig struct {
 	AccessKeySecret string `mapstructure:"access_key_secret"` // env-injected in prod
 	Region          string `mapstructure:"region"`            // default: cn-shanghai
 	MockResult      string `mapstructure:"mock_result"`       // dev only: pass | suspect | reject
+}
+
+// EncryptionConfig holds field-level encryption parameters (added in Step 11).
+//
+// PhoneKey is a 64-character hex string (= 32 raw bytes, AES-256 key).
+// PhonePepper is an arbitrary secret string appended before SHA-256 hashing
+// to prevent rainbow-table attacks on the phone_hash column.
+//
+// Both fields default to empty string. Empty PhoneKey → phone_encrypted stores
+// plaintext (dev mode). Empty PhonePepper → hash equals plain SHA-256(phone)
+// (backward compatible with Step 3–10 existing rows).
+//
+// Production reads from env vars:
+//
+//	APP_ENCRYPTION_PHONE_KEY    — 64 hex chars, required in prod
+//	APP_ENCRYPTION_PHONE_PEPPER — any string, required in prod
+type EncryptionConfig struct {
+	PhoneKey    string `mapstructure:"phone_key"`    // 64 hex chars = 32-byte AES-256 key
+	PhonePepper string `mapstructure:"phone_pepper"` // arbitrary secret, pepper for phone_hash
 }
 
 // RatelimitConfig holds knobs that apply to *generic* rate-limit middleware
@@ -348,6 +368,18 @@ func validate(cfg *Config) error {
 	}
 	if cfg.Ratelimit.SMSPerIPPerDay <= 0 {
 		return fmt.Errorf("ratelimit.sms_per_ip_per_day must be positive")
+	}
+
+	// [Step 11] Encryption validation.
+	if key := cfg.Encryption.PhoneKey; key != "" {
+		if len(key) != 64 {
+			return fmt.Errorf("encryption.phone_key must be 64 hex characters (32 bytes), got %d chars", len(key))
+		}
+		for i, c := range key {
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return fmt.Errorf("encryption.phone_key contains non-hex character %q at position %d", c, i)
+			}
+		}
 	}
 
 	return nil
