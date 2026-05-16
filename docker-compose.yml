@@ -54,10 +54,35 @@ services:
     networks:
       - cooking-dev-net
 
+  # ── RabbitMQ 3.x (management plugin) ─────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: cooking-rabbitmq-dev
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: cooking
+      RABBITMQ_DEFAULT_PASS: cooking123
+      RABBITMQ_DEFAULT_VHOST: /
+    ports:
+      - "5672:5672"   # AMQP — exposed to host so `go run ./cmd/server` can connect
+      - "15672:15672" # Management UI at http://localhost:15672 (cooking/cooking123)
+    volumes:
+      - rabbitmq-dev-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - cooking-dev-net
+
 volumes:
   mysql-dev-data:
     driver: local
     # Data persists across `docker compose down` (requires `docker compose down -v` to wipe).
+  rabbitmq-dev-data:
+    driver: local
 
 networks:
   cooking-dev-net:

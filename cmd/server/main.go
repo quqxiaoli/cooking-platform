@@ -499,7 +499,7 @@ func initEventBus(cfg config.MQConfig) (event.EventBus, error) {
 		if cfg.URL == "" {
 			return nil, fmt.Errorf("mq.url is required when provider=rabbitmq")
 		}
-		return event.NewRabbitMQBus(cfg.URL, cfg.Timeout)
+		return event.NewRabbitMQBus(cfg)
 	default:
 		return nil, fmt.Errorf("unknown mq provider: %q (supported: channel, rabbitmq)", cfg.Provider)
 	}

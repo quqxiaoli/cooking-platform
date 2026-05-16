@@ -41,9 +41,11 @@ jwt:
   refresh_token_ttl: 168h
 
 mq:
-  provider: rabbitmq
-  url: "amqp://<RABBITMQ_USER>:<RABBITMQ_PASSWORD>@rabbitmq:5672/"
-  timeout: 5s
+  provider: rabbitmq                              # dev=channel; prod 用 RabbitMQ 实现持久化 + 多实例共享消费
+  url: "<env:APP_MQ_URL>"                         # amqp://cooking:pass@rabbitmq:5672/  注入，不 commit 真实值
+  timeout: 10s                                    # dev=5s; prod 网络延迟较高，拨号超时放宽
+  reconnect_max_retries: 5                        # 断线最多重试 5 次（指数退避 1s→2s→4s…上限 30s）
+  reconnect_initial_delay: 1s
 
 # [Step 10] Production uses real Aliyun SMS.
 # access_key_id / access_key_secret injected via env:
