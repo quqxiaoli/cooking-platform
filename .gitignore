@@ -52,13 +52,9 @@ id_ecdsa
 *_ed25519
 *_ecdsa
 
-# 在 .gitignore 末尾追加
-cat >> .gitignore <<'EOF'
-
 # ── Script backups (sed -i.bak / vim ~) ───────────────────────────────────────
 *.bak
 *~
-EOF
 
-# 确认追加成功
-tail -5 .gitignore
+# ── Obsidian workspace config ─────────────────────────────────────────────────
+.obsidian/
