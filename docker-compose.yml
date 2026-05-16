@@ -1,17 +1,20 @@
 # docker-compose.yml — Development environment
-# Single MySQL 8.0 + single Redis 7.2. No replication, no Sentinel, no RabbitMQ.
-# Production docker-compose (with high availability) lives at docker-compose.prod.yml
-# and will be generated in Phase 3 (Step 13).
+# MySQL 8.0 master + slave (GTID) + Redis 7.2 + RabbitMQ 3.13
 #
 # Usage:
-#   make docker-up   → start MySQL + Redis in background
+#   make docker-up   → start all services in background
 #   make docker-down → stop and remove containers (volumes preserved)
 #   make docker-down V=1 → also remove volumes (wipes data)
+#
+# MySQL replication topology (Step 14):
+#   mysql (master, port 3306, server-id=1)
+#   mysql-slave (slave, port 3307, server-id=2, read_only=ON)
+#   mysql-slave-init (one-shot init container — sets up CHANGE REPLICATION SOURCE TO)
 
 
 services:
 
-  # ── MySQL 8.0 ─────────────────────────────────────────────────────────────
+  # ── MySQL 8.0 master ──────────────────────────────────────────────────────
   mysql:
     image: mysql:8.0
     container_name: cooking-mysql-dev
@@ -26,12 +29,70 @@ services:
       - mysql-dev-data:/var/lib/mysql
       # Custom MySQL config: ngram_token_size=2, utf8mb4, GTID (mirrors prod settings)
       - ./deploy/mysql/dev.cnf:/etc/mysql/conf.d/dev.cnf:ro
+      # Create replication user on first init (GTID slave needs this user)
+      - ./deploy/mysql/init-master.sql:/docker-entrypoint-initdb.d/01-init-master.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-pcooking123"]
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 30s
+    networks:
+      - cooking-dev-net
+
+  # ── MySQL 8.0 slave ───────────────────────────────────────────────────────
+  # read_only=ON enforced via slave.cnf; host port 3307 avoids collision with master.
+  mysql-slave:
+    image: mysql:8.0
+    container_name: cooking-mysql-slave-dev
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: cooking123
+      MYSQL_DATABASE: cooking_platform
+      # Allow root@'%' so mysql-slave-init can connect from another container.
+      # Safe in dev (isolated Docker network); prod uses a dedicated mgmt user.
+      MYSQL_ROOT_HOST: "%"
+    ports:
+      - "3307:3306"   # host:3307 → container:3306 (app uses 127.0.0.1:3307 in dev)
+    volumes:
+      - mysql-slave-dev-data:/var/lib/mysql
+      - ./deploy/mysql/slave.cnf:/etc/mysql/conf.d/slave.cnf:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-pcooking123"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - cooking-dev-net
+
+  # ── MySQL replication initialiser (one-shot) ───────────────────────────────
+  # Runs CHANGE REPLICATION SOURCE TO + START REPLICA after both master and
+  # slave are healthy. restart=no ensures this is a one-shot init container.
+  # On subsequent `docker compose up -d` calls, Docker skips this container
+  # if it already exited successfully.
+  mysql-slave-init:
+    image: mysql:8.0
+    container_name: cooking-mysql-slave-init
+    restart: "no"
+    environment:
+      MASTER_HOST: mysql
+      MASTER_PORT: "3306"
+      SLAVE_HOST: mysql-slave
+      REPL_USER: repl
+      REPL_PASSWORD: repl123
+      SLAVE_ROOT_PASSWORD: cooking123
+    volumes:
+      - ./deploy/mysql/init-slave.sh:/init-slave.sh:ro
+    entrypoint: ["/bin/bash", "/init-slave.sh"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+      mysql-slave:
+        condition: service_healthy
     networks:
       - cooking-dev-net
 
@@ -81,6 +142,8 @@ volumes:
   mysql-dev-data:
     driver: local
     # Data persists across `docker compose down` (requires `docker compose down -v` to wipe).
+  mysql-slave-dev-data:
+    driver: local
   rabbitmq-dev-data:
     driver: local
 

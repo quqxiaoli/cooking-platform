@@ -11,6 +11,11 @@ server:
 
 database:
   dsn: "<DB_USER>:<DB_PASSWORD>@tcp(mysql-master:3306)/cooking_platform?charset=utf8mb4&parseTime=True&loc=Local&timeout=5s"
+  # [Step 14] Replica DSNs for DBResolver read-write splitting.
+  # Add more entries to distribute read load across multiple slaves.
+  # In Docker Compose prod, slave container name is mysql-slave (port 3306 internal).
+  slaves_dsn:
+    - "<DB_USER>:<DB_PASSWORD>@tcp(mysql-slave:3306)/cooking_platform?charset=utf8mb4&parseTime=True&loc=Local&timeout=5s"
   max_open_conns: 50
   max_idle_conns: 20
   max_lifetime: 5m

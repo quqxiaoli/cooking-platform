@@ -38,6 +38,7 @@ type ServerConfig struct {
 
 type DatabaseConfig struct {
 	DSN          string        `mapstructure:"dsn"`
+	SlavesDSN    []string      `mapstructure:"slaves_dsn"`    // [Step 14] replica DSNs for DBResolver; empty → all traffic to master
 	MaxOpenConns int           `mapstructure:"max_open_conns"`
 	MaxIdleConns int           `mapstructure:"max_idle_conns"`
 	MaxLifetime  time.Duration `mapstructure:"max_lifetime"`
@@ -250,6 +251,7 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("database.max_lifetime", "5m")
 	v.SetDefault("database.max_idle_time", "5m")
 	v.SetDefault("database.log_level", "warn")
+	v.SetDefault("database.slaves_dsn", []string{}) // [Step 14] empty → single-master mode
 
 	v.SetDefault("redis.pool_size", 10)
 	v.SetDefault("redis.dial_timeout", "5s")
