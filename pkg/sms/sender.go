@@ -33,7 +33,7 @@ func NewSender(cfg config.SMSConfig) (Sender, error) {
 	case "mock", "":
 		return NewMockSender(), nil
 	case "aliyun":
-		return nil, fmt.Errorf("aliyun sms sender not implemented yet (added in Step 10), use 'mock' for development")
+		return NewAliyunSender(cfg)
 	default:
 		return nil, fmt.Errorf("unknown sms provider: %q (supported: mock, aliyun)", cfg.Provider)
 	}

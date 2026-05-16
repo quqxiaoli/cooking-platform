@@ -120,10 +120,10 @@ func (s *PostService) Create(ctx context.Context, userID int64, req dto.CreatePo
 		}
 	}
 
-	// MVP: directly visible, audit_status=pending (=0). Step 10 flips this
-	// site's IsVisible default to PostInvisible. The CreatedAt/UpdatedAt
-	// explicit-set pattern works around GORM v2's default:CURRENT_TIMESTAMP
-	// behaviour that leaves Go-side fields as zero time after INSERT.
+	// [Step 10] New posts start invisible (is_visible=0, audit_status=pending).
+	// AuditConsumer receives the AuditEvent published below, calls the content
+	// safety API, and flips is_visible to 1 on approval. MockAuditor (dev mode)
+	// resolves in milliseconds so posts become visible almost immediately.
 	now := time.Now()
 	p := &model.Post{
 		UserID:      userID,
@@ -131,7 +131,7 @@ func (s *PostService) Create(ctx context.Context, userID int64, req dto.CreatePo
 		Content:     req.Content,
 		SceneTag:    sceneTag,
 		CoverURL:    req.CoverURL,
-		IsVisible:   model.PostVisible,
+		IsVisible:   model.PostInvisible,
 		AuditStatus: model.AuditStatusPending,
 		CreatedAt:   now,
 		UpdatedAt:   now,
@@ -159,7 +159,11 @@ func (s *PostService) Create(ctx context.Context, userID int64, req dto.CreatePo
 	}
 
 	// Async side effects — best-effort, never fail the user-visible op.
+	// publishPostEvent → CountConsumer increments users.post_count.
+	// publishAuditEvent → AuditConsumer calls content safety API, then
+	//   flips is_visible + audit_status once the verdict is ready.
 	s.publishPostEvent(ctx, p)
+	s.publishAuditEvent(ctx, p)
 	s.bumpFeedVersion(ctx, p.ID)
 
 	return &dto.CreatePostResp{
@@ -464,6 +468,38 @@ func normaliseSize(size int) int {
 		return 50
 	default:
 		return size
+	}
+}
+
+// publishAuditEvent sends a pending-audit notification to TopicAudit.
+// AuditStatus=0 (AuditStatusPending) signals AuditConsumer that this is a
+// submission request, not a result. The consumer will call the content safety
+// API, obtain the real verdict, and update audit_status + is_visible in DB.
+//
+// RawResponse and Remark are empty in the submission event — the consumer
+// fills those after calling the API and writes them to audit_log.
+func (s *PostService) publishAuditEvent(ctx context.Context, p *model.Post) {
+	now := time.Now().UnixMilli()
+	payload := event.AuditEvent{
+		EventID:     uuid.NewString(),
+		PostID:      p.ID,
+		AuthorID:    p.UserID,
+		AuditStatus: int8(model.AuditStatusPending),
+		Remark:      "",
+		RawResponse: "",
+		Timestamp:   now,
+	}
+	evt := event.Event{
+		ID:        payload.EventID,
+		Topic:     event.TopicAudit,
+		Timestamp: now,
+		Payload:   event.MustMarshalPayload(payload),
+	}
+	if err := s.bus.Publish(ctx, evt); err != nil {
+		zap.L().Warn("publish audit event failed",
+			zap.Int64("post_id", p.ID),
+			zap.Error(err),
+		)
 	}
 }
 

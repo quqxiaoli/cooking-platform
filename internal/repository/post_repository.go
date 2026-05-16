@@ -114,6 +114,15 @@ type PostRepository interface {
 	// own page sees everything. We keep the repository neutral so the
 	// service can choose either policy with a single boolean.
 	ListByUser(ctx context.Context, userID int64, includeInvisible bool, cursorTime time.Time, size int) ([]*model.Post, error)
+
+	// UpdateAuditStatus sets audit_status, is_visible, and audit_remark on
+	// a post in one UPDATE statement. Called only by AuditConsumer (Step 10)
+	// after the content-safety API returns a verdict.
+	//
+	// Using a dedicated method (rather than a generic Update) keeps the
+	// audit state transition explicit and auditable: grep for
+	// UpdateAuditStatus to find every code path that changes visibility.
+	UpdateAuditStatus(ctx context.Context, postID int64, auditStatus, isVisible uint8, remark string) error
 }
 
 // postRepository is the GORM-backed implementation. Lowercase by design —
@@ -230,6 +239,23 @@ func (r *postRepository) ListFeed(ctx context.Context, scene int8, cursorTime ti
 		return nil, err
 	}
 	return posts, nil
+}
+
+// UpdateAuditStatus executes a targeted UPDATE on the three audit columns.
+//
+// We use map[string]interface{} instead of a struct pointer so GORM does
+// not skip zero-value fields (e.g. is_visible=0 when a post is rejected).
+// The WHERE clause targets only one row (primary key), so no index hint
+// is needed and the statement is always O(1).
+func (r *postRepository) UpdateAuditStatus(ctx context.Context, postID int64, auditStatus, isVisible uint8, remark string) error {
+	return r.db.WithContext(ctx).
+		Model(&model.Post{}).
+		Where("id = ?", postID).
+		Updates(map[string]interface{}{
+			"audit_status": auditStatus,
+			"is_visible":   isVisible,
+			"audit_remark": remark,
+		}).Error
 }
 
 // ListByUser runs the author-page feed query.

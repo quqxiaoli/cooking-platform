@@ -45,6 +45,7 @@ import (
 	"cooking-platform/internal/middleware"
 	"cooking-platform/internal/repository"
 	"cooking-platform/internal/service"
+	"cooking-platform/pkg/audit"
 	"cooking-platform/pkg/config"
 	jwtpkg "cooking-platform/pkg/jwt"
 	"cooking-platform/pkg/logger"
@@ -145,9 +146,21 @@ func main() {
 	likeHandler := handler.NewLikeHandler(likeSvc)
 	log.Info("like module wired")
 
+	// ── 7.10 [Step 10] Audit module wiring ───────────────────────────────────
+	// auditRepo and auditor are initialised here (before StartAll) so
+	// AuditConsumer can be registered in the same StartAll batch as the
+	// other consumers. feedCache and postRepo are already available from 7.5.
+	auditRepo := repository.NewAuditRepository(db)
+	auditor, err := audit.NewAuditor(cfg.Audit)
+	if err != nil {
+		log.Fatal("init auditor", zap.Error(err))
+	}
+	log.Info("auditor initialized", zap.String("provider", cfg.Audit.Provider))
+
 	consumerMgr.Register(consumer.NewLikeConsumer(bus, likeRepo))
 	consumerMgr.Register(consumer.NewPVConsumer(bus, db))
 	consumerMgr.Register(consumer.NewCountConsumer(bus, db))
+	consumerMgr.Register(consumer.NewAuditConsumer(bus, postRepo, auditRepo, auditor, feedCache))
 	consumerMgr.StartAll()
 
 	// ── 7.7 [Step 7] Search module wiring ─────────────────────────────────────

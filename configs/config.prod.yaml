@@ -45,15 +45,29 @@ mq:
   url: "amqp://<RABBITMQ_USER>:<RABBITMQ_PASSWORD>@rabbitmq:5672/"
   timeout: 5s
 
-# [Step 3 / Step 10] Production uses real Aliyun SMS.
-# APP_ALIYUN_ACCESS_KEY_ID and APP_ALIYUN_ACCESS_KEY_SECRET come from env
-# (configured in Step 10 when Aliyun integration goes live).
+# [Step 10] Production uses real Aliyun SMS.
+# access_key_id / access_key_secret injected via env:
+#   APP_SMS_ACCESS_KEY_ID / APP_SMS_ACCESS_KEY_SECRET
 sms:
   provider: aliyun
+  access_key_id: "<SMS_ACCESS_KEY_ID>"
+  access_key_secret: "<SMS_ACCESS_KEY_SECRET>"
   sign_name: "<SMS_SIGN_NAME>"
   template_code: "<SMS_TEMPLATE_CODE>"
   code_length: 6
   code_ttl: 5m
+
+# [Step 10] Content moderation — production uses real Aliyun Green service.
+# access_key_id / access_key_secret injected via env:
+#   APP_AUDIT_ACCESS_KEY_ID / APP_AUDIT_ACCESS_KEY_SECRET
+# Use a dedicated RAM sub-account with Green-read-only permissions
+# (principle of least privilege — do NOT share with SMS or OSS key).
+audit:
+  provider: aliyun
+  access_key_id: "<AUDIT_ACCESS_KEY_ID>"
+  access_key_secret: "<AUDIT_ACCESS_KEY_SECRET>"
+  region: cn-shanghai
+  mock_result: ""     # ignored when provider=aliyun
 
 # [Step 9] Production uses real Aliyun OSS.
 # access_key_id and access_key_secret come from env:

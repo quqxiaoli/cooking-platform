@@ -21,6 +21,7 @@ type Config struct {
 	MQ        MQConfig        `mapstructure:"mq"`
 	SMS       SMSConfig       `mapstructure:"sms"`       // [Step 3] SMS provider config
 	OSS       OSSConfig       `mapstructure:"oss"`       // [Step 9] OSS provider config
+	Audit     AuditConfig     `mapstructure:"audit"`     // [Step 10] content moderation config
 	Ratelimit RatelimitConfig `mapstructure:"ratelimit"` // [Step 3] generic rate limit knobs
 }
 
@@ -77,13 +78,18 @@ type MQConfig struct {
 // SMSConfig drives the SMS sender factory.
 //
 // [Step 3] Provider="mock" uses pkg/sms/mock.go (logs the code instead of sending).
-// [Step 10] Provider="aliyun" will use pkg/sms/aliyun.go (real Aliyun SMS API).
+// [Step 10] Provider="aliyun" uses pkg/sms/aliyun.go (real Aliyun dysmsapi).
+//
+// AccessKeyID / AccessKeySecret are NEVER stored in config.yaml — production
+// reads them from APP_SMS_ACCESS_KEY_ID / APP_SMS_ACCESS_KEY_SECRET env vars.
 type SMSConfig struct {
-	Provider     string        `mapstructure:"provider"`      // mock | aliyun
-	SignName     string        `mapstructure:"sign_name"`     // Aliyun signature, ignored by mock
-	TemplateCode string        `mapstructure:"template_code"` // Aliyun template ID, ignored by mock
-	CodeLength   int           `mapstructure:"code_length"`   // default 6
-	CodeTTL      time.Duration `mapstructure:"code_ttl"`      // default 5m
+	Provider        string        `mapstructure:"provider"`          // mock | aliyun
+	AccessKeyID     string        `mapstructure:"access_key_id"`     // env-injected in prod
+	AccessKeySecret string        `mapstructure:"access_key_secret"` // env-injected in prod
+	SignName        string        `mapstructure:"sign_name"`         // Aliyun signature name
+	TemplateCode    string        `mapstructure:"template_code"`     // Aliyun template ID
+	CodeLength      int           `mapstructure:"code_length"`       // default 6
+	CodeTTL         time.Duration `mapstructure:"code_ttl"`          // default 5m
 }
 
 // OSSConfig drives the OSS client factory (added in Step 9).
@@ -106,6 +112,23 @@ type OSSConfig struct {
 	MaxImageSize    int64         `mapstructure:"max_image_size"`    // default 5 MiB
 	UploadHourly    int           `mapstructure:"upload_hourly"`     // per-user presign rate cap
 	MockListenAddr  string        `mapstructure:"mock_listen_addr"`  // dev only, e.g. 127.0.0.1:18080
+}
+
+// AuditConfig drives the content moderation auditor factory (added in Step 10).
+//
+// Provider="mock" returns a MockAuditor whose verdict is set by MockResult
+// (pass / suspect / reject). Useful for dev + integration tests.
+// Provider="aliyun" calls the Aliyun Green content-safety service synchronously
+// inside AuditConsumer — the consumer's goroutine blocks until the API returns.
+//
+// AccessKeyID / AccessKeySecret: production reads from
+// APP_AUDIT_ACCESS_KEY_ID / APP_AUDIT_ACCESS_KEY_SECRET env vars.
+type AuditConfig struct {
+	Provider        string `mapstructure:"provider"`          // mock | aliyun
+	AccessKeyID     string `mapstructure:"access_key_id"`     // env-injected in prod
+	AccessKeySecret string `mapstructure:"access_key_secret"` // env-injected in prod
+	Region          string `mapstructure:"region"`            // default: cn-shanghai
+	MockResult      string `mapstructure:"mock_result"`       // dev only: pass | suspect | reject
 }
 
 // RatelimitConfig holds knobs that apply to *generic* rate-limit middleware
@@ -196,6 +219,11 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("sms.code_length", 6)
 	v.SetDefault("sms.code_ttl", "5m")
 
+	// [Step 10] Audit defaults — mock provider, auto-pass in dev.
+	v.SetDefault("audit.provider", "mock")
+	v.SetDefault("audit.region", "cn-shanghai")
+	v.SetDefault("audit.mock_result", "pass")
+
 	// [Step 9] OSS defaults — mock provider on 127.0.0.1:18080.
 	v.SetDefault("oss.provider", "mock")
 	v.SetDefault("oss.presign_ttl", "15m")
@@ -247,6 +275,30 @@ func validate(cfg *Config) error {
 	}
 	if cfg.SMS.CodeTTL <= 0 {
 		return fmt.Errorf("sms.code_ttl must be positive")
+	}
+	if cfg.SMS.Provider == "aliyun" {
+		if cfg.SMS.AccessKeyID == "" || cfg.SMS.AccessKeySecret == "" {
+			return fmt.Errorf("sms.access_key_id and sms.access_key_secret are required when provider=aliyun")
+		}
+		if cfg.SMS.SignName == "" || cfg.SMS.TemplateCode == "" {
+			return fmt.Errorf("sms.sign_name and sms.template_code are required when provider=aliyun")
+		}
+	}
+
+	switch cfg.Audit.Provider {
+	case "mock", "aliyun", "":
+	default:
+		return fmt.Errorf("audit.provider must be 'mock' or 'aliyun', got %q", cfg.Audit.Provider)
+	}
+	if cfg.Audit.Provider == "aliyun" {
+		if cfg.Audit.AccessKeyID == "" || cfg.Audit.AccessKeySecret == "" {
+			return fmt.Errorf("audit.access_key_id and audit.access_key_secret are required when provider=aliyun")
+		}
+	}
+	switch cfg.Audit.MockResult {
+	case "pass", "suspect", "reject", "":
+	default:
+		return fmt.Errorf("audit.mock_result must be 'pass', 'suspect', or 'reject', got %q", cfg.Audit.MockResult)
 	}
 
 	// [Step 9] OSS validation.
