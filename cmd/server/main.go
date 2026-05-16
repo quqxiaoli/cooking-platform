@@ -122,7 +122,7 @@ func main() {
 	}
 	log.Info("sms sender initialized", zap.String("provider", cfg.SMS.Provider))
 
-	userSvc := service.NewUserService(userRepo, userCache, jwtMgr, smsSender, cfg.SMS, cfg.OSS, cfg.Ratelimit)
+	userSvc := service.NewUserService(userRepo, userCache, jwtMgr, smsSender, cfg.SMS, cfg.OSS, cfg.Encryption, cfg.Ratelimit)
 	userHandler := handler.NewUserHandler(userSvc)
 
 	// ── 7.5 [Step 4] Post module wiring ───────────────────────────────────────

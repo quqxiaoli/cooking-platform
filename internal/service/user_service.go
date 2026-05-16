@@ -30,6 +30,7 @@ import (
 	"cooking-platform/internal/model/dto"
 	"cooking-platform/internal/repository"
 	"cooking-platform/pkg/config"
+	"cooking-platform/pkg/crypto"
 	"cooking-platform/pkg/errcode"
 	"cooking-platform/pkg/jwt"
 	"cooking-platform/pkg/oss"
@@ -45,7 +46,8 @@ type UserService struct {
 	jwtMgr    *jwt.Manager
 	smsSender sms.Sender
 	smsCfg    config.SMSConfig
-	ossCfg    config.OSSConfig // [Step 9] for avatar_url whitelist
+	ossCfg    config.OSSConfig    // [Step 9] for avatar_url whitelist
+	encCfg    config.EncryptionConfig // [Step 11] phone AES-GCM key + pepper
 	rlCfg     config.RatelimitConfig
 }
 
@@ -54,6 +56,9 @@ type UserService struct {
 // [Step 9] ossCfg is held so UpdateProfile can enforce the avatar_url
 // whitelist via oss.IsAllowedURL — defence in depth on top of the upload
 // callback flow.
+// [Step 11] encCfg carries the AES-256-GCM key (PhoneKey) and pepper
+// (PhonePepper) for phone field-level encryption. Empty values are safe
+// in dev — encryption degrades to a no-op (see pkg/crypto/phone.go).
 func NewUserService(
 	repo repository.UserRepository,
 	userCache *cache.UserCache,
@@ -61,6 +66,7 @@ func NewUserService(
 	smsSender sms.Sender,
 	smsCfg config.SMSConfig,
 	ossCfg config.OSSConfig,
+	encCfg config.EncryptionConfig,
 	rlCfg config.RatelimitConfig,
 ) *UserService {
 	return &UserService{
@@ -70,6 +76,7 @@ func NewUserService(
 		smsSender: smsSender,
 		smsCfg:    smsCfg,
 		ossCfg:    ossCfg,
+		encCfg:    encCfg,
 		rlCfg:     rlCfg,
 	}
 }
@@ -79,7 +86,7 @@ func NewUserService(
 // SendCode dispatches a verification code to the user's phone after passing
 // three rate-limit checks: per-phone window, per-phone daily, per-IP daily.
 func (s *UserService) SendCode(ctx context.Context, phone, clientIP string) (*dto.SendCodeResp, error) {
-	phoneHash := hashPhone(phone)
+	phoneHash := s.hashPhone(phone)
 	ipHash := hashIP(clientIP)
 
 	// 1. Per-phone window — "no more than one send within the window".
@@ -137,7 +144,7 @@ func (s *UserService) SendCode(ctx context.Context, phone, clientIP string) (*dt
 // Login verifies the SMS code and either logs in an existing user or creates
 // a new one.
 func (s *UserService) Login(ctx context.Context, phone, code string) (*dto.LoginResp, error) {
-	phoneHash := hashPhone(phone)
+	phoneHash := s.hashPhone(phone)
 
 	storedCode, err := s.userCache.GetSMSCode(ctx, phoneHash)
 	if err != nil {
@@ -165,10 +172,18 @@ func (s *UserService) Login(ctx context.Context, phone, code string) (*dto.Login
 		// explicitly per the Step 6 R-1 fix (default:CURRENT_TIMESTAMP(3)
 		// makes GORM skip Go-side fillup, so the returned struct's
 		// timestamps would otherwise be zero).
+		encrypted, encErr := crypto.EncryptPhone(phone, s.encCfg.PhoneKey)
+		if encErr != nil {
+			zap.L().Error("encrypt phone failed on register",
+				zap.String("phone_hash", phoneHash),
+				zap.Error(encErr),
+			)
+			return nil, errcode.ErrEncryptPhone
+		}
 		now := time.Now()
 		user = &model.User{
 			PhoneHash:      phoneHash,
-			PhoneEncrypted: phone, // Step 3: plaintext. Step 11: AES-GCM ciphertext.
+			PhoneEncrypted: encrypted, // [Step 11] AES-GCM ciphertext; plaintext in dev (key="")
 			Nickname:       defaultNickname(phone),
 			CreatedAt:      now,
 			UpdatedAt:      now,
@@ -247,9 +262,21 @@ func (s *UserService) GetMyProfile(ctx context.Context, userID int64) (*dto.User
 		}
 		return nil, fmt.Errorf("find user: %w", err)
 	}
+	plain, decErr := crypto.DecryptPhone(user.PhoneEncrypted, s.encCfg.PhoneKey)
+	if decErr != nil {
+		// Decryption failure is non-fatal for the profile read — log and
+		// return a safe placeholder rather than a 500. This can only happen
+		// if the key was rotated without re-running the migration script.
+		zap.L().Warn("decrypt phone failed on profile read",
+			zap.Int64("user_id", userID),
+			zap.Int("errcode", errcode.ErrDecryptPhone.Code),
+			zap.Error(decErr),
+		)
+		plain = ""
+	}
 	resp := dto.UserPrivateResp{
 		UserPublicResp: toPublicResp(user),
-		PhoneMasked:    maskPhone(user.PhoneEncrypted),
+		PhoneMasked:    maskPhone(plain),
 	}
 	return &resp, nil
 }
@@ -361,9 +388,11 @@ func (s *UserService) issueTokenPair(userID int64) (*dto.TokenPair, error) {
 	}, nil
 }
 
-func hashPhone(phone string) string {
-	sum := sha256.Sum256([]byte(phone))
-	return hex.EncodeToString(sum[:])
+// hashPhone delegates to crypto.HashPhone so the pepper from encCfg is applied.
+// When PhonePepper is empty (dev mode), result equals plain SHA256(phone) —
+// backward compatible with phone_hash rows written in Step 3–10.
+func (s *UserService) hashPhone(phone string) string {
+	return crypto.HashPhone(phone, s.encCfg.PhonePepper)
 }
 
 func hashIP(ip string) string {

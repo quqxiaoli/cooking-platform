@@ -141,6 +141,15 @@ var (
 //   - caller not logged in → 401001 ErrUnauthorized
 //   - resource not found   → 404001 ErrNotFound
 var (
-	ErrAuditAPIFailed  = New(http.StatusInternalServerError, 470101, "content safety API call failed")
+	ErrAuditAPIFailed   = New(http.StatusInternalServerError, 470101, "content safety API call failed")
 	ErrAuditWriteFailed = New(http.StatusInternalServerError, 470102, "audit result write failed")
+)
+
+// ── Encryption Module (5xx, code segment 480xxx) ───────────────────────────
+// [Step 11] AES-GCM phone field-level encryption errors. Never returned to
+// HTTP callers — encryption is transparent infrastructure. Codes exist for
+// structured log tagging (Prometheus alert on key misconfiguration).
+var (
+	ErrEncryptPhone = New(http.StatusInternalServerError, 480101, "phone encryption failed")
+	ErrDecryptPhone = New(http.StatusInternalServerError, 480102, "phone decryption failed")
 )
