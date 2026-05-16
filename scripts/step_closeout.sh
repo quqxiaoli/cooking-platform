@@ -112,55 +112,62 @@ else
     incr_warn
 fi
 
-# ── 5. Commit message 草稿 ──────────────────────────────────────────
-section "5. Commit message 草稿"
+# ── 5+6. 收尾命令块（填充完整，整段复制即可执行）─────────────────
+section "5. 收尾命令块（整段复制粘贴执行）"
 
-# 抽取偏离点摘要（从进度追踪文件的「偏离点」章节）
+# 从分支名提取模块名，fallback 到占位符
+MODULE_NAME=$(echo "$BRANCH" | sed "s/feature\/step-${N}-//")
+if [ "$MODULE_NAME" = "$BRANCH" ]; then
+    MODULE_NAME="<模块名>"
+fi
+
+# 从进度追踪文件提取偏离点（表格行，去掉分隔行和空行）
 DEVIATION_SUMMARY=""
 if [ -f "$PROGRESS_FILE" ]; then
     DEVIATION_SUMMARY=$(awk '
-        /偏离点/ { capture=1; next }
-        capture && /^##/ { exit }
-        capture { print }
-    ' "$PROGRESS_FILE" | grep -v '^$' | head -10)
+        /\*\*本步与 PRD 的偏离点\*\*/ { capture=1; next }
+        capture && /^---/ { exit }
+        capture && /^\|---/ { next }
+        capture && /^\|/ { print }
+    ' "$PROGRESS_FILE" | grep -v '^$' | grep -v '^| PRD 章节' | head -5)
 fi
+DEVIATION_LINE="${DEVIATION_SUMMARY:-严格按 PRD 实现}"
 
-cat <<EOF
+# 从代码变更清单提取所有模块节标题作为主要变更摘要
+CHANGES_SUMMARY=""
+if [ -f "${CHANGES_FILES[0]:-}" ]; then
+    CHANGES_SUMMARY=$(grep '^## ' "${CHANGES_FILES[0]}" \
+        | grep -v '本步无变更' \
+        | sed 's/^## /- /' \
+        | head -6)
+fi
+CHANGES_LINE="${CHANGES_SUMMARY:-（见变更清单）}"
 
------ 复制以下内容作为 commit message -----
-feat(step-${N}): <模块名> 实现完成
+# 输出完整可执行命令块
+cat <<BLOCK
+
+━━━━━━━━━━━━  整段复制，粘贴到终端执行  ━━━━━━━━━━━━
+
+git add . && git commit -F- <<'COMMIT_MSG'
+feat(step-${N}): ${MODULE_NAME} 实现完成
 
 主要变更：
-- 数据层：...
-- 业务层：...
-- 接入层：...
+${CHANGES_LINE}
 
 偏离点：
-${DEVIATION_SUMMARY:-（无，本步严格按 PRD 实现）}
+${DEVIATION_LINE}
 
 验证：scripts/verify_step${N}.sh 全部通过
------------------------------------------
-EOF
-
-# ── 6. 收尾流程提醒 ─────────────────────────────────────────────────
-section "6. 收尾流程命令模板"
-
-cat <<EOF
-# 1) 提交本步所有改动到 feature 分支
-git add .
-git commit -F- <<'COMMIT_MSG'
-（粘贴上面的 commit message）
 COMMIT_MSG
 
-# 2) 合并到 main 并打 tag
 git checkout main
-git merge --no-ff feature/step-${N}-<模块名>
+git merge --no-ff ${BRANCH}
 git tag step-${N}-done
-
-# 3) 推送（这是 v3+ 工作流的关键卡点）
 git push origin main --tags
 
-EOF
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+BLOCK
 
 # ── 总结 ────────────────────────────────────────────────────────────
 section "总结"
