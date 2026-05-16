@@ -12,14 +12,22 @@
 package middleware
 
 import (
+	"context"
 	"errors"
 
-	"cooking-platform/internal/service"
 	"cooking-platform/pkg/errcode"
 	"cooking-platform/pkg/response"
 
 	"github.com/gin-gonic/gin"
 )
+
+// TokenVerifier validates access tokens and returns the associated uid and jti.
+//
+// Defined here so middleware does not import the service package.
+// *service.UserService satisfies this interface without any changes.
+type TokenVerifier interface {
+	VerifyAccessToken(ctx context.Context, token string) (uid int64, jti string, err error)
+}
 
 // Context keys for authenticated request data. Strings are unexported to
 // prevent accidental collisions with handler-set keys.
@@ -32,9 +40,9 @@ const (
 //
 // The middleware:
 //  1. Extracts the token from the Authorization header
-//  2. Calls userService.VerifyAccessToken to validate signature, blacklist, ban
+//  2. Calls v.VerifyAccessToken to validate signature, blacklist, ban
 //  3. Stores user_id and jti in the gin context for downstream use
-func Auth(userSvc *service.UserService) gin.HandlerFunc {
+func Auth(v TokenVerifier) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token, err := extractBearerToken(c.GetHeader("Authorization"))
 		if err != nil {
@@ -43,7 +51,7 @@ func Auth(userSvc *service.UserService) gin.HandlerFunc {
 			return
 		}
 
-		uid, jti, err := userSvc.VerifyAccessToken(c.Request.Context(), token)
+		uid, jti, err := v.VerifyAccessToken(c.Request.Context(), token)
 		if err != nil {
 			var appErr *errcode.AppError
 			if errors.As(err, &appErr) {

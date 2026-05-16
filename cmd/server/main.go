@@ -204,8 +204,10 @@ func main() {
 	log.Info("custom validators registered")
 
 	// ── 9. Gin engine ─────────────────────────────────────────────────────────
+	// HealthHandler is created here so setupRouter does not need *gorm.DB.
+	healthHandler := handler.NewHealthHandler(db, rdb)
 	gin.SetMode(cfg.Server.Mode)
-	engine := setupRouter(db, rdb, userSvc, userHandler, postHandler, feedHandler, likeHandler, searchHandler, followHandler, uploadHandler)
+	engine := setupRouter(rdb, userSvc, healthHandler, userHandler, postHandler, feedHandler, likeHandler, searchHandler, followHandler, uploadHandler)
 
 	// ── 10. HTTP server ───────────────────────────────────────────────────────
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
@@ -284,15 +286,17 @@ func main() {
 
 // setupRouter wires HTTP routes for all modules.
 //
-// Signature evolution: each module added in subsequent steps brings its own
-// service/handler pair as parameters. Keep all routes in this single function
-// so the URL structure of the API is visible at one glance.
+// Parameters:
+//   - rdb: Redis client used only for rate-limit middleware (RateLimitConfig.RDB).
+//   - tokenVerifier: satisfied by *service.UserService; decouples middleware from service.
+//   - healthHandler: pre-constructed in main() so setupRouter does not need *gorm.DB.
 //
-// [Step 9] adds: uploadHandler (POST /upload/presign, POST /upload/callback).
+// Signature evolution: each new module adds its handler as a parameter.
+// Keep all routes in one function so the full API surface is visible at a glance.
 func setupRouter(
-	db *gorm.DB,
 	rdb *goredis.Client,
-	userSvc *service.UserService,
+	tokenVerifier middleware.TokenVerifier,
+	healthHandler *handler.HealthHandler,
 	userHandler *handler.UserHandler,
 	postHandler *handler.PostHandler,
 	feedHandler *handler.FeedHandler,
@@ -313,7 +317,6 @@ func setupRouter(
 	r.Use(middleware.CORS())
 
 	// Infrastructure routes (no auth required).
-	healthHandler := handler.NewHealthHandler(db, rdb)
 	r.GET("/health", healthHandler.Health)
 	r.GET("/readiness", healthHandler.Readiness)
 
@@ -326,7 +329,7 @@ func setupRouter(
 		authGroup.POST("/send-code", userHandler.SendCode)
 		authGroup.POST("/login", userHandler.Login)
 		authGroup.POST("/refresh", userHandler.Refresh)
-		authGroup.POST("/logout", middleware.Auth(userSvc), userHandler.Logout)
+		authGroup.POST("/logout", middleware.Auth(tokenVerifier), userHandler.Logout)
 	}
 
 	// [Step 3+4+8] User routes — mixed visibility.
@@ -336,13 +339,13 @@ func setupRouter(
 		userGroup.GET("/:id/posts", feedHandler.ListByUser)
 
 		// [Step 8] Follow resource on a user.
-		userGroup.POST("/:id/follow", middleware.Auth(userSvc), followHandler.Follow)
-		userGroup.DELETE("/:id/follow", middleware.Auth(userSvc), followHandler.Unfollow)
+		userGroup.POST("/:id/follow", middleware.Auth(tokenVerifier), followHandler.Follow)
+		userGroup.DELETE("/:id/follow", middleware.Auth(tokenVerifier), followHandler.Unfollow)
 		userGroup.GET("/:id/followers", followHandler.ListFollowers)
 		userGroup.GET("/:id/following", followHandler.ListFollowing)
 
 		// Protected — current user only.
-		meGroup := userGroup.Group("/me", middleware.Auth(userSvc))
+		meGroup := userGroup.Group("/me", middleware.Auth(tokenVerifier))
 		{
 			meGroup.GET("", userHandler.GetMyProfile)
 			meGroup.PATCH("", userHandler.UpdateProfile)
@@ -353,7 +356,7 @@ func setupRouter(
 	postGroup := v1.Group("/posts")
 	{
 		postGroup.POST("",
-			middleware.Auth(userSvc),
+			middleware.Auth(tokenVerifier),
 			middleware.RateLimit(middleware.RateLimitConfig{
 				RDB:     rdb,
 				KeyFunc: middleware.PerUserKey("limit:pub"),
@@ -365,7 +368,7 @@ func setupRouter(
 		postGroup.GET("/:id", postHandler.GetDetail)
 
 		postGroup.POST("/:id/like",
-			middleware.Auth(userSvc),
+			middleware.Auth(tokenVerifier),
 			middleware.RateLimit(middleware.RateLimitConfig{
 				RDB:     rdb,
 				KeyFunc: middleware.PerUserKey("limit:like"),
@@ -375,11 +378,11 @@ func setupRouter(
 			likeHandler.Like,
 		)
 		postGroup.DELETE("/:id/like",
-			middleware.Auth(userSvc),
+			middleware.Auth(tokenVerifier),
 			likeHandler.Unlike,
 		)
 		postGroup.GET("/:id/like",
-			middleware.Auth(userSvc),
+			middleware.Auth(tokenVerifier),
 			likeHandler.GetLikeStatus,
 		)
 	}
@@ -411,7 +414,7 @@ func setupRouter(
 	// rate-limited: it's already gated by single-use nonce + ownership
 	// check, and a callback corresponds to an upload the user already
 	// PUT, so abuse would just delete their own nonces.
-	uploadGroup := v1.Group("/upload", middleware.Auth(userSvc))
+	uploadGroup := v1.Group("/upload", middleware.Auth(tokenVerifier))
 	{
 		uploadGroup.POST("/presign",
 			middleware.RateLimit(middleware.RateLimitConfig{
