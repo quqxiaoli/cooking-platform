@@ -131,3 +131,16 @@ var (
 	ErrUploadURLNotAllowed   = New(http.StatusBadRequest, 460105, "url not in oss whitelist")
 	ErrPostStepsInvalid      = New(http.StatusBadRequest, 460106, "post steps invalid")
 )
+
+// ── Audit Module (5xx, code segment 470xxx) ────────────────────────────────
+// [Step 10] Internal errors emitted by AuditConsumer. Never returned to HTTP
+// callers — audit runs fully async. Codes exist for structured log tagging
+// so Prometheus / Grafana can alert on audit pipeline failures.
+//
+// Reused codes (NOT redefined here):
+//   - caller not logged in → 401001 ErrUnauthorized
+//   - resource not found   → 404001 ErrNotFound
+var (
+	ErrAuditAPIFailed  = New(http.StatusInternalServerError, 470101, "content safety API call failed")
+	ErrAuditWriteFailed = New(http.StatusInternalServerError, 470102, "audit result write failed")
+)

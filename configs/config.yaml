@@ -51,11 +51,23 @@ mq:
 # Dev uses 'mock' — verification codes are logged instead of sent.
 # Inspect logs to find the code: search for "[SMS MOCK]" in stdout.
 sms:
-  provider: mock      # mock | aliyun
-  sign_name: ""       # Aliyun signature, only used when provider=aliyun
-  template_code: ""   # Aliyun template ID, only used when provider=aliyun
+  provider: mock          # mock | aliyun
+  access_key_id: ""       # env: APP_SMS_ACCESS_KEY_ID  (aliyun only)
+  access_key_secret: ""   # env: APP_SMS_ACCESS_KEY_SECRET (aliyun only)
+  sign_name: ""           # Aliyun signature, only used when provider=aliyun
+  template_code: ""       # Aliyun template ID, only used when provider=aliyun
   code_length: 6
   code_ttl: 5m
+
+# [Step 10] Content moderation configuration.
+# Dev uses 'mock' — AuditConsumer auto-approves posts immediately (mock_result=pass).
+# Set mock_result=reject to test rejection flow without real API calls.
+audit:
+  provider: mock          # mock | aliyun
+  access_key_id: ""       # env: APP_AUDIT_ACCESS_KEY_ID  (aliyun only)
+  access_key_secret: ""   # env: APP_AUDIT_ACCESS_KEY_SECRET (aliyun only)
+  region: cn-shanghai     # Aliyun Green service region (aliyun only)
+  mock_result: pass       # dev only: pass | suspect | reject
 
 # [Step 9] OSS provider configuration.
 # Dev uses 'mock' — pkg/oss/mock.go starts an embedded HTTP listener on

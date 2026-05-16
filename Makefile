@@ -136,6 +136,10 @@ verify-step8: ## 运行 Step 8 关注模块端到端验证
 verify-step9: ## 运行 Step 9 图片上传模块端到端验证
 	@bash scripts/verify_step9.sh
 
+.PHONY: verify-step10
+verify-step10: ## 运行 Step 10 内容审核 + 阿里云短信端到端验证
+	@bash scripts/verify_step10.sh
+
 # ── Step Management (v4 工作流) ───────────────────────────────────────────────
 ## step-diff N=10: 生成本步代码变更清单脚手架（基于 git diff step-N-1-done..HEAD）
 .PHONY: step-diff
