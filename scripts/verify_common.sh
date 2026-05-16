@@ -203,3 +203,22 @@ assert_json() {
     fail "$4 (jq '$2' 期望 '$3',实际 '$actual')"
   fi
 }
+
+# assert_contains <haystack> <needle> <label>
+# 检查字符串中是否包含子串。用于 HTTP 响应头断言等非 JSON 场景。
+assert_contains() {
+  if echo "$1" | grep -qF "$2"; then
+    ok "$3"
+  else
+    fail "$3 (在输出中找不到: '$2')"
+  fi
+}
+
+# assert_not_contains <haystack> <needle> <label>
+assert_not_contains() {
+  if echo "$1" | grep -qF "$2"; then
+    fail "$3 (不应出现但找到了: '$2')"
+  else
+    ok "$3"
+  fi
+}

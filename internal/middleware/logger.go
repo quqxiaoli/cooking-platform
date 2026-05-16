@@ -1,20 +1,51 @@
 package middleware
 
 import (
+	"net/url"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
 
+// sensitiveQueryParams lists query parameter names whose values must be
+// redacted before writing to logs. Names are matched case-insensitively.
+var sensitiveQueryParams = map[string]struct{}{
+	"phone": {}, "mobile": {}, "code": {}, "token": {},
+	"access_key": {}, "accesskey": {}, "secret": {}, "password": {},
+}
+
+// sanitizeQuery replaces values of sensitive query parameters with "***".
+func sanitizeQuery(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.ParseQuery(raw)
+	if err != nil {
+		return "[unparseable]"
+	}
+	for key := range parsed {
+		lower := key
+		for i := 0; i < len(lower); i++ {
+			if lower[i] >= 'A' && lower[i] <= 'Z' {
+				lower = lower[:i] + string(lower[i]+'a'-'A') + lower[i+1:]
+			}
+		}
+		if _, sensitive := sensitiveQueryParams[lower]; sensitive {
+			parsed[key] = []string{"***"}
+		}
+	}
+	return parsed.Encode()
+}
+
 // Logger logs each HTTP request using the global zap logger.
 // Fields logged: method, path, status, latency, client_ip, request_id.
-// Errors are logged at Error level; everything else at Info level.
+// Query parameters matching sensitiveQueryParams are redacted to "***".
 func Logger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
 		path := c.Request.URL.Path
-		query := c.Request.URL.RawQuery
+		query := sanitizeQuery(c.Request.URL.RawQuery)
 
 		c.Next()
 

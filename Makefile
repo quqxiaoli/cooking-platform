@@ -19,7 +19,7 @@ V        ?= 0   # set V=1 to also remove volumes on docker-down
 .PHONY: all build run test test-cover lint lint-fix \
         check-migrate migrate-up migrate-down migrate-status migrate-force migrate-create \
         docker-up docker-down docker-logs docker-ps \
-        verify-step7 verify-step11 migrate-phone migrate-phone-dry \
+        verify-step7 verify-step11 verify-step12 migrate-phone migrate-phone-dry \
         clean deps help
 # ── Default ───────────────────────────────────────────────────────────────────
 all: build
@@ -143,6 +143,10 @@ verify-step10: ## 运行 Step 10 内容审核 + 阿里云短信端到端验证
 .PHONY: verify-step11
 verify-step11: ## 运行 Step 11 手机号 AES-GCM 加密端到端验证
 	@bash scripts/verify_step11.sh
+
+.PHONY: verify-step12
+verify-step12: ## 运行 Step 12 日志脱敏 + 错误码收口端到端验证
+	@bash scripts/verify_step12.sh
 
 ## migrate-phone: 一次性迁移 phone_encrypted 为 AES-GCM 密文（需设 APP_ENCRYPTION_PHONE_KEY）
 .PHONY: migrate-phone
