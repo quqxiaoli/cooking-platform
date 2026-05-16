@@ -73,9 +73,11 @@ type JWTConfig struct {
 
 // MQConfig selects the EventBus implementation.
 type MQConfig struct {
-	Provider string        `mapstructure:"provider"` // channel | rabbitmq
-	URL      string        `mapstructure:"url"`      // amqp://... when provider=rabbitmq
-	Timeout  time.Duration `mapstructure:"timeout"`
+	Provider              string        `mapstructure:"provider"`               // channel | rabbitmq
+	URL                   string        `mapstructure:"url"`                    // amqp://... when provider=rabbitmq
+	Timeout               time.Duration `mapstructure:"timeout"`                // dial timeout
+	ReconnectMaxRetries   int           `mapstructure:"reconnect_max_retries"`  // max reconnect attempts (0 = no retry)
+	ReconnectInitialDelay time.Duration `mapstructure:"reconnect_initial_delay"` // exponential backoff base; caps at 30s
 }
 
 // SMSConfig drives the SMS sender factory.
@@ -267,6 +269,8 @@ func registerDefaults(v *viper.Viper) {
 
 	v.SetDefault("mq.provider", "channel")
 	v.SetDefault("mq.timeout", "5s")
+	v.SetDefault("mq.reconnect_max_retries", 5)
+	v.SetDefault("mq.reconnect_initial_delay", "1s")
 
 	// [Step 3] SMS defaults — mock provider, 6-digit codes valid for 5 minutes.
 	v.SetDefault("sms.provider", "mock")
@@ -330,6 +334,12 @@ func validate(cfg *Config) error {
 	case "channel", "rabbitmq", "":
 	default:
 		return fmt.Errorf("mq.provider must be 'channel' or 'rabbitmq', got %q", cfg.MQ.Provider)
+	}
+	if cfg.MQ.ReconnectMaxRetries < 0 {
+		return fmt.Errorf("mq.reconnect_max_retries must be >= 0, got %d", cfg.MQ.ReconnectMaxRetries)
+	}
+	if cfg.MQ.ReconnectInitialDelay <= 0 {
+		return fmt.Errorf("mq.reconnect_initial_delay must be positive")
 	}
 
 	switch cfg.SMS.Provider {

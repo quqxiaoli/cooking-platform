@@ -46,6 +46,8 @@ mq:
   provider: channel   # channel (MVP) | rabbitmq (production)
   url: ""             # amqp://user:pass@host:5672/ — only used when provider=rabbitmq
   timeout: 5s
+  reconnect_max_retries: 5     # max reconnect attempts; 0 = no retry
+  reconnect_initial_delay: 1s  # exponential backoff base (1s→2s→4s…capped at 30s)
 
 # [Step 3] SMS provider configuration.
 # Dev uses 'mock' — verification codes are logged instead of sent.
