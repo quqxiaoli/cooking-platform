@@ -12,6 +12,11 @@ database:
   # Dev: root connects to the cooking_platform database exposed on localhost:3306.
   # The password matches MYSQL_ROOT_PASSWORD in docker-compose.yml.
   dsn: "root:cooking123@tcp(127.0.0.1:3306)/cooking_platform?charset=utf8mb4&parseTime=True&loc=Local&timeout=5s"
+  # [Step 14] Slave replica for read-write splitting via GORM DBResolver.
+  # Port 3307 is the host-mapped port for cooking-mysql-slave-dev.
+  # Empty list → DBResolver not registered, all traffic goes to master.
+  slaves_dsn:
+    - "root:cooking123@tcp(127.0.0.1:3307)/cooking_platform?charset=utf8mb4&parseTime=True&loc=Local&timeout=5s"
   max_open_conns: 25
   max_idle_conns: 10
   max_lifetime: 5m

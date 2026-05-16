@@ -1,0 +1,60 @@
+# deploy/mysql/slave.cnf
+# Mounted into the MySQL slave container at /etc/mysql/conf.d/slave.cnf (read-only).
+#
+# Key differences from master (dev.cnf):
+#   server-id=2       — must differ from master (server-id=1)
+#   read_only=ON      — prevents accidental writes to slave via app
+#   super_read_only   — blocks even SUPER users (migrations must target master DSN explicitly)
+#   log_slave_updates — GTID requires the slave to write received transactions to its own binlog
+#                       so that any downstream replica can follow the same GTID sequence
+
+[mysqld]
+# ── Character set (must match master) ────────────────────────────────────────
+character-set-server   = utf8mb4
+collation-server       = utf8mb4_unicode_ci
+init_connect           = 'SET NAMES utf8mb4'
+
+# ── Full-text search (ngram tokeniser for Chinese) ───────────────────────────
+ngram_token_size       = 2
+
+# ── Timezone ──────────────────────────────────────────────────────────────────
+default_time_zone      = '+08:00'
+
+# ── Replication identity ───────────────────────────────────────────────────────
+server-id              = 2            # unique per node; master=1, slave=2
+gtid_mode              = ON
+enforce_gtid_consistency = ON
+binlog_format          = ROW
+log_bin                = mysql-bin
+log_slave_updates      = ON           # write replicated TXs to own binlog (GTID requirement)
+relay_log              = relay-bin
+relay_log_recovery     = ON           # auto-recover relay log on crash
+
+# ── Read-only protection ───────────────────────────────────────────────────────
+# read_only / super_read_only are intentionally NOT set here.
+# Reason: MySQL Docker entrypoint uses this config file to launch a temporary
+# mysqld during data-directory initialisation. Setting super_read_only in the
+# file blocks the entrypoint's SQL (CREATE USER, GRANT) and the root user is
+# never created, making the slave permanently inaccessible.
+#
+# Instead, the mysql-slave-init helper container runs
+#   SET GLOBAL read_only=ON; SET GLOBAL super_read_only=ON;
+# after replication starts. This protects the slave for its container lifetime.
+# See deploy/mysql/init-slave.sh for the full explanation and trade-offs.
+
+# ── InnoDB (tuned for read-heavy replica workload) ────────────────────────────
+innodb_buffer_pool_size    = 256M
+innodb_log_file_size       = 64M
+innodb_flush_log_at_trx_commit = 1
+innodb_file_per_table      = ON
+
+# ── Connection limits ─────────────────────────────────────────────────────────
+max_connections            = 200
+wait_timeout               = 600
+interactive_timeout        = 600
+
+[client]
+default-character-set = utf8mb4
+
+[mysql]
+default-character-set = utf8mb4

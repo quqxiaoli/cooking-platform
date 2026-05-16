@@ -59,6 +59,7 @@ import (
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
+	"gorm.io/plugin/dbresolver"
 )
 
 func main() {
@@ -431,7 +432,12 @@ func setupRouter(
 	return r
 }
 
-// initMySQL is unchanged from Step 1.
+// initMySQL opens a GORM connection to the master DSN and, when cfg.SlavesDSN
+// is non-empty, registers the DBResolver plugin to route SELECT statements to
+// replicas (RandomPolicy). Writes (INSERT/UPDATE/DELETE) always go to master.
+//
+// Pool settings are applied to both master (via sql.DB) and replicas (via
+// DBResolver's fluent interface) so connection pressure is distributed evenly.
 func initMySQL(cfg config.DatabaseConfig) (*gorm.DB, error) {
 	gormLevel := gormlogger.Warn
 	switch cfg.LogLevel {
@@ -448,6 +454,28 @@ func initMySQL(cfg config.DatabaseConfig) (*gorm.DB, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("gorm open: %w", err)
+	}
+
+	// [Step 14] Register DBResolver when replicas are configured.
+	// RandomPolicy distributes read load evenly across all slaves.
+	// When SlavesDSN is empty the plugin is not registered and all
+	// traffic stays on master — zero behaviour change for existing code.
+	if len(cfg.SlavesDSN) > 0 {
+		replicas := make([]gorm.Dialector, len(cfg.SlavesDSN))
+		for i, dsn := range cfg.SlavesDSN {
+			replicas[i] = mysql.Open(dsn)
+		}
+		resolver := dbresolver.Register(dbresolver.Config{
+			Replicas: replicas,
+			Policy:   dbresolver.RandomPolicy{},
+		}).
+			SetConnMaxIdleTime(cfg.MaxIdleTime).
+			SetConnMaxLifetime(cfg.MaxLifetime).
+			SetMaxIdleConns(cfg.MaxIdleConns).
+			SetMaxOpenConns(cfg.MaxOpenConns)
+		if err := db.Use(resolver); err != nil {
+			return nil, fmt.Errorf("register dbresolver: %w", err)
+		}
 	}
 
 	sqlDB, err := db.DB()
