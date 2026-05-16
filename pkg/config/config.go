@@ -24,6 +24,8 @@ type Config struct {
 	Audit      AuditConfig      `mapstructure:"audit"`      // [Step 10] content moderation config
 	Encryption EncryptionConfig `mapstructure:"encryption"` // [Step 11] phone field-level encryption
 	Ratelimit  RatelimitConfig  `mapstructure:"ratelimit"`  // [Step 3] generic rate limit knobs
+	Consumer   ConsumerConfig   `mapstructure:"consumer"`   // [Step 13] per-consumer batch/flush tuning
+	Cache      CacheConfig      `mapstructure:"cache"`      // [Step 13] Redis TTL knobs
 }
 
 type ServerConfig struct {
@@ -151,6 +153,38 @@ type EncryptionConfig struct {
 	PhonePepper string `mapstructure:"phone_pepper"` // arbitrary secret, pepper for phone_hash
 }
 
+// ConsumerConfig holds per-consumer batch/flush tuning knobs (added in Step 13).
+// All values were previously hardcoded package-level constants; moving them here
+// allows production RabbitMQ tuning without code changes.
+type ConsumerConfig struct {
+	Like  LikeConsumerConfig  `mapstructure:"like"`
+	PV    PVConsumerConfig    `mapstructure:"pv"`
+	Count CountConsumerConfig `mapstructure:"count"`
+}
+
+type LikeConsumerConfig struct {
+	BatchSize     int           `mapstructure:"batch_size"`
+	FlushInterval time.Duration `mapstructure:"flush_interval"`
+}
+
+type PVConsumerConfig struct {
+	BatchSize     int           `mapstructure:"batch_size"`
+	FlushInterval time.Duration `mapstructure:"flush_interval"`
+}
+
+type CountConsumerConfig struct {
+	BatchSize     int           `mapstructure:"batch_size"`
+	FlushInterval time.Duration `mapstructure:"flush_interval"`
+}
+
+// CacheConfig holds Redis TTLs for the cache layer (added in Step 13).
+// Values were previously hardcoded constants in cache/*.go.
+type CacheConfig struct {
+	LikeStateTTL time.Duration `mapstructure:"like_state_ttl"` // like:set:* and like:cnt:* keys
+	FeedCacheTTL time.Duration `mapstructure:"feed_cache_ttl"` // per-page feed payload cache
+	PVDedupTTL   time.Duration `mapstructure:"pv_dedup_ttl"`   // pv:dup:* dedup window
+}
+
 // RatelimitConfig holds knobs that apply to *generic* rate-limit middleware
 // usage across the codebase. SMS-specific three-dimension limits are NOT here
 // — they are encoded in user_service because they cannot be expressed as a
@@ -257,6 +291,19 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("ratelimit.sms_phone_window", "60s")
 	v.SetDefault("ratelimit.sms_per_phone_per_day", 5)
 	v.SetDefault("ratelimit.sms_per_ip_per_day", 10)
+
+	// [Step 13] Consumer batch/flush defaults — previously hardcoded constants.
+	v.SetDefault("consumer.like.batch_size", 50)
+	v.SetDefault("consumer.like.flush_interval", "3s")
+	v.SetDefault("consumer.pv.batch_size", 100)
+	v.SetDefault("consumer.pv.flush_interval", "5s")
+	v.SetDefault("consumer.count.batch_size", 20)
+	v.SetDefault("consumer.count.flush_interval", "10s")
+
+	// [Step 13] Cache TTL defaults — previously hardcoded constants.
+	v.SetDefault("cache.like_state_ttl", "168h") // 7 days
+	v.SetDefault("cache.feed_cache_ttl", "5m")
+	v.SetDefault("cache.pv_dedup_ttl", "1h")
 }
 
 func validate(cfg *Config) error {
@@ -368,6 +415,37 @@ func validate(cfg *Config) error {
 	}
 	if cfg.Ratelimit.SMSPerIPPerDay <= 0 {
 		return fmt.Errorf("ratelimit.sms_per_ip_per_day must be positive")
+	}
+
+	// [Step 13] Consumer config validation.
+	if cfg.Consumer.Like.BatchSize <= 0 {
+		return fmt.Errorf("consumer.like.batch_size must be positive")
+	}
+	if cfg.Consumer.Like.FlushInterval <= 0 {
+		return fmt.Errorf("consumer.like.flush_interval must be positive")
+	}
+	if cfg.Consumer.PV.BatchSize <= 0 {
+		return fmt.Errorf("consumer.pv.batch_size must be positive")
+	}
+	if cfg.Consumer.PV.FlushInterval <= 0 {
+		return fmt.Errorf("consumer.pv.flush_interval must be positive")
+	}
+	if cfg.Consumer.Count.BatchSize <= 0 {
+		return fmt.Errorf("consumer.count.batch_size must be positive")
+	}
+	if cfg.Consumer.Count.FlushInterval <= 0 {
+		return fmt.Errorf("consumer.count.flush_interval must be positive")
+	}
+
+	// [Step 13] Cache TTL validation.
+	if cfg.Cache.LikeStateTTL <= 0 {
+		return fmt.Errorf("cache.like_state_ttl must be positive")
+	}
+	if cfg.Cache.FeedCacheTTL <= 0 {
+		return fmt.Errorf("cache.feed_cache_ttl must be positive")
+	}
+	if cfg.Cache.PVDedupTTL <= 0 {
+		return fmt.Errorf("cache.pv_dedup_ttl must be positive")
 	}
 
 	// [Step 11] Encryption validation.

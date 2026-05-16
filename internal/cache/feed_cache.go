@@ -66,33 +66,26 @@ import (
 )
 
 // FeedCache exposes Feed-related Redis operations.
+// feedCacheTTL and pvDedupTTL are injected from config (were exported constants before Step 13).
 type FeedCache struct {
-	rdb *redis.Client
+	rdb          *redis.Client
+	feedCacheTTL time.Duration
+	pvDedupTTL   time.Duration
 }
 
 // NewFeedCache constructs a FeedCache.
-func NewFeedCache(rdb *redis.Client) *FeedCache {
-	return &FeedCache{rdb: rdb}
+// feedCacheTTL is the per-page cache lifetime; pvDedupTTL is the view dedup window.
+func NewFeedCache(rdb *redis.Client, feedCacheTTL, pvDedupTTL time.Duration) *FeedCache {
+	return &FeedCache{rdb: rdb, feedCacheTTL: feedCacheTTL, pvDedupTTL: pvDedupTTL}
 }
 
-// ── Key constants & TTLs ────────────────────────────────────────────────────
+// ── Key constants ───────────────────────────────────────────────────────────
 
 const (
 	// feedVersionKey is the global Feed cache version. INCR on any write
 	// that affects what Feed should show (post create / audit transition /
 	// soft delete).
 	feedVersionKey = "feed:ver"
-
-	// FeedCacheTTL is the lifetime of a single cached feed page. 5 minutes
-	// is a balance: long enough to absorb a thundering herd on a hot scene
-	// tag, short enough that an unexpected stale page (e.g. across a
-	// version bump that this read missed) self-heals quickly.
-	FeedCacheTTL = 5 * time.Minute
-
-	// PVDedupTTL is the dedup window for view counting: a user's repeat
-	// view of the same post within this window does NOT increment view_count.
-	// 1 hour matches PRD-Phase2 §6 F-I02 AC-2.
-	PVDedupTTL = 1 * time.Hour
 )
 
 // ── Feed version ────────────────────────────────────────────────────────────
@@ -203,7 +196,7 @@ func (c *FeedCache) MarkPVSeen(ctx context.Context, postID, viewerID int64, ip s
 	// NX = only set if not exists; EX = TTL in seconds. The reply is
 	// "OK" on insertion, nil on collision — go-redis surfaces this as
 	// (true, nil) / (false, nil) via SetNX().
-	ok, err := c.rdb.SetNX(ctx, key, 1, PVDedupTTL).Result()
+	ok, err := c.rdb.SetNX(ctx, key, 1, c.pvDedupTTL).Result()
 	if err != nil {
 		return false, err
 	}

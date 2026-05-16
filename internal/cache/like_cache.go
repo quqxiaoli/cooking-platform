@@ -67,20 +67,17 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// likeStateTTL is the sliding TTL applied to like:set:* and like:cnt:* keys.
-// See file header for rationale on the value.
-const likeStateTTL = 7 * 24 * time.Hour
-
 // LikeCache wraps the Redis client with like-module-specific helpers.
-// It holds the *redis.Client by value-of-pointer (just the pointer), no
-// internal state. Construct via NewLikeCache and inject as a dependency.
+// stateTTL is injected from config (was hardcoded 7d constant before Step 13).
 type LikeCache struct {
-	rdb *redis.Client
+	rdb      *redis.Client
+	stateTTL time.Duration
 }
 
 // NewLikeCache constructs a LikeCache backed by the given Redis client.
-func NewLikeCache(rdb *redis.Client) *LikeCache {
-	return &LikeCache{rdb: rdb}
+// stateTTL is the sliding TTL for like:set:* and like:cnt:* keys (see file header).
+func NewLikeCache(rdb *redis.Client, stateTTL time.Duration) *LikeCache {
+	return &LikeCache{rdb: rdb, stateTTL: stateTTL}
 }
 
 // ── Key builders ────────────────────────────────────────────────────────────
@@ -117,39 +114,56 @@ func (c *LikeCache) HasLiked(ctx context.Context, postID, userID int64) (bool, e
 
 // ── Mutation: SADD + INCR (Like) ───────────────────────────────────────────
 
+// addLikeScript atomically SADDs the user to the like set and INCRs the
+// counter ONLY if the SADD actually inserted a new member (returned 1).
+//
+// This fixes the SADD+INCR non-atomicity in the previous pipeline-based
+// implementation (Step 13). The old code always INCRd even when SADD
+// returned 0 (duplicate), causing an off-by-one on the counter.
+//
+// Symmetry with RemoveLike's Lua script: both mutations are now atomic.
+//
+// KEYS[1] = like:set:{post_id}
+// KEYS[2] = like:cnt:{post_id}
+// ARGV[1] = userID as string
+// ARGV[2] = TTL in seconds
+//
+// Returns the current count (after INCR if new member, unchanged otherwise).
+const addLikeScript = `
+local added = redis.call('SADD', KEYS[1], ARGV[1])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+if added == 0 then
+    local v = redis.call('GET', KEYS[2])
+    if not v then return 0 end
+    return tonumber(v)
+end
+local n = redis.call('INCR', KEYS[2])
+redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2]))
+return n
+`
+
 // AddLike adds userID to the post's like set and increments the counter.
 //
-// Two separate ops are issued (SADD, then INCR) rather than a Lua script.
-// The race window — a doubly-concurrent like by the same user — is bounded
-// by the SISMEMBER check that the service layer performs first; even if
-// two requests slip through that check, SADD is idempotent (returns 0 if
-// the member was already present) but INCR is not. The resulting Redis
-// counter would be off-by-one until LikeConsumer reconciles.
-//
-// We accept this MVP-level inconsistency. A Lua script that conditionally
-// INCRs only if SADD returned 1 would be exactly correct, and is a
-// natural Step 13 hardening when we move to RabbitMQ and tighten the
-// counting story end-to-end.
+// Uses a Lua script to ensure SADD and conditional INCR are atomic:
+// INCR is skipped when SADD returns 0 (member already present), preventing
+// the off-by-one that the previous pipeline implementation produced when
+// concurrent or duplicate like requests slipped past the SISMEMBER guard.
 //
 // Returns the new count for the caller's response payload.
 func (c *LikeCache) AddLike(ctx context.Context, postID, userID int64) (uint32, error) {
-	pipe := c.rdb.Pipeline()
-	pipe.SAdd(ctx, keyLikeSet(postID), userID)
-	pipe.Expire(ctx, keyLikeSet(postID), likeStateTTL)
-	incrCmd := pipe.Incr(ctx, keyLikeCount(postID))
-	pipe.Expire(ctx, keyLikeCount(postID), likeStateTTL)
-
-	if _, err := pipe.Exec(ctx); err != nil {
-		return 0, fmt.Errorf("redis pipeline AddLike: %w", err)
+	res, err := c.rdb.Eval(ctx, addLikeScript,
+		[]string{keyLikeSet(postID), keyLikeCount(postID)},
+		strconv.FormatInt(userID, 10),
+		int64(c.stateTTL.Seconds()),
+	).Result()
+	if err != nil {
+		return 0, fmt.Errorf("redis EVAL AddLike: %w", err)
 	}
-
-	v := incrCmd.Val()
-	if v < 0 {
-		// Defensive: INCR shouldn't return negative on a fresh key, but
-		// don't expose negatives if Redis ever surprises us.
+	n, ok := res.(int64)
+	if !ok || n < 0 {
 		return 0, nil
 	}
-	return uint32(v), nil
+	return uint32(n), nil
 }
 
 // ── Mutation: SREM + DECR (Unlike) ─────────────────────────────────────────
@@ -170,7 +184,7 @@ func (c *LikeCache) RemoveLike(ctx context.Context, postID, userID int64) (uint3
 	// SREM in pipeline; DECR-clamp-at-zero in Lua.
 	pipe := c.rdb.Pipeline()
 	pipe.SRem(ctx, keyLikeSet(postID), userID)
-	pipe.Expire(ctx, keyLikeSet(postID), likeStateTTL)
+	pipe.Expire(ctx, keyLikeSet(postID), c.stateTTL)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return 0, fmt.Errorf("redis pipeline RemoveLike (SREM): %w", err)
 	}
@@ -187,7 +201,7 @@ local n = redis.call('DECR', KEYS[1])
 redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1]))
 return n
 `
-	res, err := c.rdb.Eval(ctx, decrClampScript, []string{keyLikeCount(postID)}, int64(likeStateTTL.Seconds())).Result()
+	res, err := c.rdb.Eval(ctx, decrClampScript, []string{keyLikeCount(postID)}, int64(c.stateTTL.Seconds())).Result()
 	if err != nil {
 		return 0, fmt.Errorf("redis EVAL DECR-clamp: %w", err)
 	}

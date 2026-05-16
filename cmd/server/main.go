@@ -129,19 +129,19 @@ func main() {
 	// Step 9 change: NewPostService now also takes cfg.OSS so Create can
 	// enforce the OSS whitelist on cover_url + each step's image_urls.
 	postRepo := repository.NewPostRepository(db)
-	feedCache := cache.NewFeedCache(rdb)
+	feedCache := cache.NewFeedCache(rdb, cfg.Cache.FeedCacheTTL, cfg.Cache.PVDedupTTL)
 	// [Step 7] AuthorAssembler is shared by PostService (feed / author-page)
 	// and SearchService — single source of truth for author-snapshot
 	// assembly.
 	authorAssembler := service.NewAuthorAssembler(userRepo)
-	postSvc := service.NewPostService(postRepo, userRepo, feedCache, bus, authorAssembler, cfg.OSS)
+	postSvc := service.NewPostService(postRepo, userRepo, feedCache, bus, authorAssembler, cfg.OSS, cfg.Cache)
 	postHandler := handler.NewPostHandler(postSvc)
 	feedHandler := handler.NewFeedHandler(postSvc)
 	log.Info("post module wired")
 
 	// ── 7.6 [Step 5] Like module + Consumer wiring ────────────────────────────
 	likeRepo := repository.NewLikeRepository(db)
-	likeCache := cache.NewLikeCache(rdb)
+	likeCache := cache.NewLikeCache(rdb, cfg.Cache.LikeStateTTL)
 	likeSvc := service.NewLikeService(postRepo, likeCache, bus)
 	likeHandler := handler.NewLikeHandler(likeSvc)
 	log.Info("like module wired")
@@ -157,9 +157,9 @@ func main() {
 	}
 	log.Info("auditor initialized", zap.String("provider", cfg.Audit.Provider))
 
-	consumerMgr.Register(consumer.NewLikeConsumer(bus, likeRepo))
-	consumerMgr.Register(consumer.NewPVConsumer(bus, db))
-	consumerMgr.Register(consumer.NewCountConsumer(bus, db))
+	consumerMgr.Register(consumer.NewLikeConsumer(bus, likeRepo, cfg.Consumer.Like))
+	consumerMgr.Register(consumer.NewPVConsumer(bus, db, cfg.Consumer.PV))
+	consumerMgr.Register(consumer.NewCountConsumer(bus, db, cfg.Consumer.Count))
 	consumerMgr.Register(consumer.NewAuditConsumer(bus, postRepo, auditRepo, auditor, feedCache))
 	consumerMgr.StartAll()
 
@@ -487,13 +487,16 @@ func initRedis(cfg config.RedisConfig) (*goredis.Client, error) {
 	return rdb, nil
 }
 
-// initEventBus is unchanged from Step 2.
+// initEventBus selects the EventBus implementation from config.
 func initEventBus(cfg config.MQConfig) (event.EventBus, error) {
 	switch cfg.Provider {
 	case "channel", "":
 		return event.NewChannelBus(1024), nil
 	case "rabbitmq":
-		return nil, errors.New("rabbitmq event bus not implemented yet, set mq.provider=channel for MVP")
+		if cfg.URL == "" {
+			return nil, fmt.Errorf("mq.url is required when provider=rabbitmq")
+		}
+		return event.NewRabbitMQBus(cfg.URL, cfg.Timeout)
 	default:
 		return nil, fmt.Errorf("unknown mq provider: %q (supported: channel, rabbitmq)", cfg.Provider)
 	}

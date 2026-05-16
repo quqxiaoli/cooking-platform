@@ -51,12 +51,14 @@ type PostService struct {
 	feedCache *cache.FeedCache
 	bus       event.EventPublisher
 	assembler *AuthorAssembler
-	ossCfg    config.OSSConfig // [Step 9] for image URL whitelist
+	ossCfg    config.OSSConfig   // [Step 9] for image URL whitelist
+	cacheCfg  config.CacheConfig // [Step 13] feed page TTL (was cache.FeedCacheTTL constant)
 }
 
 // NewPostService constructs a PostService.
 //
 // [Step 9] ossCfg drives the cover_url + step image_urls whitelist check.
+// [Step 13] cacheCfg.FeedCacheTTL replaces the removed cache.FeedCacheTTL constant.
 func NewPostService(
 	postRepo repository.PostRepository,
 	userRepo repository.UserRepository,
@@ -64,6 +66,7 @@ func NewPostService(
 	bus event.EventPublisher,
 	assembler *AuthorAssembler,
 	ossCfg config.OSSConfig,
+	cacheCfg config.CacheConfig,
 ) *PostService {
 	return &PostService{
 		postRepo:  postRepo,
@@ -72,6 +75,7 @@ func NewPostService(
 		bus:       bus,
 		assembler: assembler,
 		ossCfg:    ossCfg,
+		cacheCfg:  cacheCfg,
 	}
 }
 
@@ -266,7 +270,7 @@ func (s *PostService) ListFeed(ctx context.Context, q dto.FeedQuery) (*dto.FeedR
 
 	if verErr == nil {
 		if data, jerr := json.Marshal(resp); jerr == nil {
-			if cerr := s.feedCache.SetFeed(ctx, scene, ver, cursorTime, data, cache.FeedCacheTTL); cerr != nil {
+			if cerr := s.feedCache.SetFeed(ctx, scene, ver, cursorTime, data, s.cacheCfg.FeedCacheTTL); cerr != nil {
 				zap.L().Warn("set feed cache failed",
 					zap.Int8("scene", scene),
 					zap.Int64("ver", ver),

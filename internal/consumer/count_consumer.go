@@ -76,15 +76,10 @@ import (
 	"time"
 
 	"cooking-platform/internal/event"
+	"cooking-platform/pkg/config"
 
 	"go.uber.org/zap"
 	"gorm.io/gorm"
-)
-
-const (
-	countBatchSize     = 20
-	countFlushInterval = 10 * time.Second
-	countChannelBuf    = countBatchSize * 4
 )
 
 // countDelta is the in-memory shape used to ferry events from the subscribe
@@ -105,13 +100,21 @@ type countDelta struct {
 
 // CountConsumer subscribes to five topics and maintains users counters.
 type CountConsumer struct {
-	bus event.EventSubscriber
-	db  *gorm.DB
+	bus           event.EventSubscriber
+	db            *gorm.DB
+	batchSize     int
+	flushInterval time.Duration
 }
 
 // NewCountConsumer constructs a CountConsumer.
-func NewCountConsumer(bus event.EventSubscriber, db *gorm.DB) *CountConsumer {
-	return &CountConsumer{bus: bus, db: db}
+// cfg provides batch/flush knobs previously hardcoded as package-level constants.
+func NewCountConsumer(bus event.EventSubscriber, db *gorm.DB, cfg config.CountConsumerConfig) *CountConsumer {
+	return &CountConsumer{
+		bus:           bus,
+		db:            db,
+		batchSize:     cfg.BatchSize,
+		flushInterval: cfg.FlushInterval,
+	}
 }
 
 // Name satisfies EventConsumer.
@@ -121,7 +124,7 @@ func (c *CountConsumer) Name() string {
 
 // Start blocks until ctx is cancelled.
 func (c *CountConsumer) Start(ctx context.Context) error {
-	eventCh := make(chan countDelta, countChannelBuf)
+	eventCh := make(chan countDelta, c.batchSize*4)
 
 	var subWg sync.WaitGroup
 	subWg.Add(5)
@@ -218,13 +221,13 @@ func (c *CountConsumer) send(ctx context.Context, eventCh chan countDelta, d cou
 func (c *CountConsumer) flushLoop(ctx context.Context, eventCh chan countDelta, subWg *sync.WaitGroup) {
 	// One map per counter column so the per-user UPDATE can set every
 	// changed column in a single statement.
-	postDeltas := make(map[int64]int64, countBatchSize)
-	likeDeltas := make(map[int64]int64, countBatchSize)
-	followerDeltas := make(map[int64]int64, countBatchSize)
-	followingDeltas := make(map[int64]int64, countBatchSize)
+	postDeltas := make(map[int64]int64, c.batchSize)
+	likeDeltas := make(map[int64]int64, c.batchSize)
+	followerDeltas := make(map[int64]int64, c.batchSize)
+	followingDeltas := make(map[int64]int64, c.batchSize)
 	bufCount := 0
 
-	ticker := time.NewTicker(countFlushInterval)
+	ticker := time.NewTicker(c.flushInterval)
 	defer ticker.Stop()
 
 	totalProcessed := 0
@@ -234,10 +237,10 @@ func (c *CountConsumer) flushLoop(ctx context.Context, eventCh chan countDelta, 
 			return
 		}
 		totalProcessed += c.flush(useCtx, postDeltas, likeDeltas, followerDeltas, followingDeltas)
-		postDeltas = make(map[int64]int64, countBatchSize)
-		likeDeltas = make(map[int64]int64, countBatchSize)
-		followerDeltas = make(map[int64]int64, countBatchSize)
-		followingDeltas = make(map[int64]int64, countBatchSize)
+		postDeltas = make(map[int64]int64, c.batchSize)
+		likeDeltas = make(map[int64]int64, c.batchSize)
+		followerDeltas = make(map[int64]int64, c.batchSize)
+		followingDeltas = make(map[int64]int64, c.batchSize)
 		bufCount = 0
 	}
 
@@ -261,7 +264,7 @@ func (c *CountConsumer) flushLoop(ctx context.Context, eventCh chan countDelta, 
 		select {
 		case d := <-eventCh:
 			apply(d)
-			if bufCount >= countBatchSize {
+			if bufCount >= c.batchSize {
 				flush(ctx)
 			}
 
@@ -270,15 +273,7 @@ func (c *CountConsumer) flushLoop(ctx context.Context, eventCh chan countDelta, 
 
 		case <-ctx.Done():
 			subWg.Wait()
-		drainLoop:
-			for {
-				select {
-				case d := <-eventCh:
-					apply(d)
-				default:
-					break drainLoop
-				}
-			}
+			DrainChan(eventCh, apply)
 			flush(context.Background())
 			zap.L().Info("count consumer drained",
 				zap.Int("total_processed", totalProcessed),

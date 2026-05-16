@@ -74,21 +74,10 @@ import (
 	"cooking-platform/internal/event"
 	"cooking-platform/internal/model"
 	"cooking-platform/internal/repository"
+	"cooking-platform/pkg/config"
 
 	"go.uber.org/zap"
 )
-
-// likeBatchSize is the per-flush event cap. PRD-Phase3 §3.4: "攒 50 条或 3s 一批".
-const likeBatchSize = 50
-
-// likeFlushInterval is the maximum staleness of an unflushed event.
-const likeFlushInterval = 3 * time.Second
-
-// likeChannelBuf sizes the internal channel that fan-ins both topics into
-// the batch loop. 4× batch size gives ~12 seconds of buffer at the flush
-// rate before backpressure kicks in — enough to absorb ChannelBus's per-
-// subscriber buffer flicker without blocking either subscribe goroutine.
-const likeChannelBuf = likeBatchSize * 4
 
 // likeAction encodes which topic an event came from. Plain int8 (not a
 // boolean) so future "edit-like" or "weighted-like" actions can be added
@@ -112,16 +101,20 @@ type likeBatchEvent struct {
 // LikeConsumer subscribes to TopicLike and TopicUnlike, batches events,
 // and persists them to MySQL via LikeRepository.
 type LikeConsumer struct {
-	bus      event.EventSubscriber
-	likeRepo repository.LikeRepository
+	bus           event.EventSubscriber
+	likeRepo      repository.LikeRepository
+	batchSize     int
+	flushInterval time.Duration
 }
 
-// NewLikeConsumer constructs a LikeConsumer. Dependencies are minimal by
-// design — the consumer owns its own batching state and ticker.
-func NewLikeConsumer(bus event.EventSubscriber, likeRepo repository.LikeRepository) *LikeConsumer {
+// NewLikeConsumer constructs a LikeConsumer.
+// cfg provides batch/flush knobs previously hardcoded as package-level constants.
+func NewLikeConsumer(bus event.EventSubscriber, likeRepo repository.LikeRepository, cfg config.LikeConsumerConfig) *LikeConsumer {
 	return &LikeConsumer{
-		bus:      bus,
-		likeRepo: likeRepo,
+		bus:           bus,
+		likeRepo:      likeRepo,
+		batchSize:     cfg.BatchSize,
+		flushInterval: cfg.FlushInterval,
 	}
 }
 
@@ -132,7 +125,7 @@ func (c *LikeConsumer) Name() string {
 
 // Start blocks until ctx is cancelled. See file header for the lifecycle.
 func (c *LikeConsumer) Start(ctx context.Context) error {
-	eventCh := make(chan likeBatchEvent, likeChannelBuf)
+	eventCh := make(chan likeBatchEvent, c.batchSize*4)
 
 	// subWg tracks the two Subscribe goroutines so we can wait for them
 	// to exit before closing eventCh — closing while a goroutine still
@@ -188,10 +181,10 @@ func (c *LikeConsumer) Start(ctx context.Context) error {
 // flushLoop accumulates events until either batchSize or flushInterval is
 // reached, then writes the batch to MySQL.
 func (c *LikeConsumer) flushLoop(ctx context.Context, eventCh chan likeBatchEvent, subWg *sync.WaitGroup) {
-	likeBuf := make([]likeBatchEvent, 0, likeBatchSize)
-	unlikeBuf := make([]likeBatchEvent, 0, likeBatchSize)
+	likeBuf := make([]likeBatchEvent, 0, c.batchSize)
+	unlikeBuf := make([]likeBatchEvent, 0, c.batchSize)
 
-	ticker := time.NewTicker(likeFlushInterval)
+	ticker := time.NewTicker(c.flushInterval)
 	defer ticker.Stop()
 
 	totalProcessed := 0
@@ -206,7 +199,7 @@ func (c *LikeConsumer) flushLoop(ctx context.Context, eventCh chan likeBatchEven
 				unlikeBuf = append(unlikeBuf, e)
 			}
 			// Flush early if either bucket alone hits the cap.
-			if len(likeBuf) >= likeBatchSize || len(unlikeBuf) >= likeBatchSize {
+			if len(likeBuf) >= c.batchSize || len(unlikeBuf) >= c.batchSize {
 				totalProcessed += c.flush(ctx, &likeBuf, &unlikeBuf)
 			}
 
@@ -216,32 +209,21 @@ func (c *LikeConsumer) flushLoop(ctx context.Context, eventCh chan likeBatchEven
 			}
 
 		case <-ctx.Done():
-			// Drain: wait for subscribers to fully exit (their drain inside
-			// ChannelBus.Subscribe will push remaining events through),
-			// then flush whatever is still in memory.
+			// Wait for subscribe goroutines to exit, then drain any events
+			// they pushed before exiting. DrainChan replaces the repeated
+			// labeled drainLoop pattern (Step 13 extraction).
 			subWg.Wait()
-			// After subWg.Wait, no more sends will occur on eventCh — safe
-			// to range-drain it without panicking on close (we never close
-			// eventCh; ChannelBus shutdown semantics don't require it).
-		drainLoop:
-			for {
-				select {
-				case e := <-eventCh:
-					switch e.action {
-					case actionLike:
-						likeBuf = append(likeBuf, e)
-					case actionUnlike:
-						unlikeBuf = append(unlikeBuf, e)
-					}
-				default:
-					break drainLoop
+			DrainChan(eventCh, func(e likeBatchEvent) {
+				switch e.action {
+				case actionLike:
+					likeBuf = append(likeBuf, e)
+				case actionUnlike:
+					unlikeBuf = append(unlikeBuf, e)
 				}
-			}
+			})
 			if len(likeBuf) > 0 || len(unlikeBuf) > 0 {
-				// Use background ctx for the final flush — the parent ctx
-				// is already cancelled, but we still need MySQL writes to
-				// complete. ConsumerManager's wg.Wait() bounds total
-				// shutdown time at this layer.
+				// Use background ctx: parent ctx is cancelled but MySQL
+				// writes must still complete before ConsumerManager unblocks.
 				totalProcessed += c.flushWithCtx(context.Background(), &likeBuf, &unlikeBuf)
 			}
 			zap.L().Info("like consumer drained",

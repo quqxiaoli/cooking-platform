@@ -38,12 +38,20 @@
 
 ## 四、文档权威性
 
-设计冲突时以最新版 PRD 为准，顺序：
+**PRD 仍然有效，且仍是首要参考**。设计冲突时以最新版 PRD 为准，顺序：
 
 1. `docs/prd/PRD-Phase3-技术架构设计-v2.2-基于v2.1的diff.md`（最权威，v2.1 的增量）
 2. `docs/prd/PRD-Phase3-技术架构设计-v2.1.md`（基础架构）
 3. `docs/prd/PRD-Phase2-需求文档-v1.1.md`
 4. `docs/prd/PRD-Phase1-立项文档.md`
+
+**演进文档**（Step 13 起与 PRD 并列参考，优先级低于 PRD 但覆盖 PRD 未涉及的生产化细节）：
+
+5. `docs/conventions/01_步骤13-17开发规范.md`（Step 13–17 新规范，含 Config-First / DrainChan / Lua 原子操作 / RabbitMQ 规范 / PRD v3.0 生成准备）
+6. `docs/audit/01_架构体检-Step12后.md`（Step 13 前的体检报告，体检修复已完成）
+
+**最终 PRD**：Step 17 结束后生成 PRD v3.0，它将整合所有偏离点、新规范、实际实现，
+成为唯一权威参考。步骤 1–17 期间的所有文档都是 v3.0 的输入材料，必须完整留存。
 
 进度状态以 `docs/progress/0x_项目进度追踪.md` 最新版为准。
 
@@ -52,16 +60,27 @@
 ## 五、落地顺序（必须严格遵守）
 
 **第一轮 · 骨架跑通**（已完成）：1-6
-**第二轮 · 补齐功能**（进行中）：
+**第二轮 · 补齐功能**（已完成）：7-12
 
 - ✅ 7. 搜索模块（错误码 45YZZZ）
 - ✅ 8. 关注模块（错误码 44YZZZ）
 - ✅ 9. 图片上传（错误码 46YZZZ）
-- 🔄 **10. 内容审核 + 阿里云短信真实接入（错误码 47YZZZ）← 当前**
-- 11. 手机号加密 AES-GCM + SHA256 迁移（错误码 48YZZZ）
-- 12. 日志脱敏 + 错误码体系最终收口
+- ✅ 10. 内容审核 + 阿里云短信真实接入（错误码 47YZZZ）
+- ✅ 11. 手机号加密 AES-GCM + SHA256 迁移（错误码 48YZZZ）
+- ✅ 12. 日志脱敏 + 错误码体系最终收口
 
-**第三轮 · 生产基础设施**：13-17（EventBus 切 RabbitMQ / 主从 / Nginx / 监控 / CI）
+**架构体检**（已完成，Step 13 前）：
+- ✅ 体检报告 `docs/audit/01_架构体检-Step12后.md`
+- ✅ H1/M1-M4 全部修复（RabbitMQ 实现 / Config-First / DrainChan / Lua AddLike）
+
+**第三轮 · 生产基础设施**（当前）：13-17
+
+- 🔄 **13. EventBus 切 RabbitMQ（生产加固：ACK / DLX / 持久化 / 重连）← 当前**
+- 14. MySQL 主从复制（GTID + DBResolver 读写分离）
+- 15. Nginx 反向代理 + 双实例负载均衡
+- 16. Prometheus + Grafana 监控
+- 17. GitHub Actions CI/CD + **PRD v3.0 生成**
+
 **第四轮 · 部署上线**：18-20
 
 ---
@@ -90,18 +109,31 @@
 
 | 类型 | 模板来源 | 套用规则 |
 |---|---|---|
-| Cache | `internal/cache/user_cache.go` | Key 命名 + TTL + 错误返回必须一致 |
-| Consumer | `internal/consumer/like_consumer.go` | 批量消费 + 优雅停机 + drained 日志必须套用 |
+| Cache | `internal/cache/user_cache.go` | Key 命名 + TTL（从 cfg.Cache 注入）+ 错误返回必须一致 |
+| Consumer | `internal/consumer/like_consumer.go` | 批量消费 + `DrainChan` + 优雅停机 + cfg 注入 + drained 日志 |
 | Repository | `internal/repository/user_repository.go` | 接口先行（FooRepository interface），ErrXxxNotFound 封装 |
 | Service | `internal/service/user_service.go` | ctx 透传 + 错误处理 + 日志格式 |
 | Handler | `internal/handler/user.go` | bind → validate → service → response 四步 |
 | 外部依赖 | `pkg/sms/{mock,aliyun}.go` | 接口 + Mock + Real 三件套，dev/prod 配置切换 |
+| EventBus | `internal/event/channel.go` + `rabbitmq.go` | 新消费者只依赖 `EventSubscriber` 接口，永不依赖具体实现 |
+
+**三条新增强制规则**（Step 13 起）：
+
+1. **Config-First**：所有可调参数（TTL / 批量大小 / 超时 / 阈值）必须进 `pkg/config/config.go`，
+   禁止写包级常量。详见 `docs/conventions/01_步骤13-17开发规范.md §1.1`。
+
+2. **Lua 原子操作**：Redis "读后写" 或 "条件写" 场景必须用 Lua 脚本，
+   禁止用 Pipeline 模拟原子性。参照 `like_cache.go: addLikeScript / decrClampScript`。
+
+3. **DrainChan**：新 Consumer 的停机 drain 必须调用 `consumer.DrainChan[T]`，
+   禁止再手写 `drainLoop:` labeled-for 块。参照 `internal/consumer/helper.go`。
 
 **常量与 Key 集中管理**：
 
 - 所有 MQ Topic：`internal/event/types.go`（追加式）
-- 所有 Redis Key 模板：引入新 Key 时同步追加到 PRD-v2.2 §6.3 Key 命名全表
-- 命名：`{module}:{purpose}:{key}`，TTL 必须显式声明
+- 所有 Redis Key 模板：引入新 Key 时同步追加到 PRD-v2.2 §6.3 Key 命名全表，
+  同时在 `docs/conventions/01_步骤13-17开发规范.md §三·3.3` 偏离点表中登记（如有变化）
+- 命名：`{module}:{purpose}:{key}`，TTL 必须从 `cfg.Cache` 注入，不许内联声明
 
 **Migration**：严格按 `000NNN_<verb>_<resource>_table.up.sql` / `.down.sql`，时间顺序递增，不跳号、不复用。
 
@@ -301,6 +333,34 @@ feat(step-N): <模块名> 实现完成
    "我先尝试 X 发现 Y 改用 Z" 这种密度才有面试价值。
 3. **每个技术决策必须能关联到 PRD ADR 编号**。找不到对应 ADR 时停下来问用户。
 4. **遇到 PRD 没覆盖的设计点**，先输出 2-3 个方案对比，让用户选，不要默默实现。
+
+---
+
+## 十四、Step 13–17 生产化阶段补充规范
+
+本节是 §七 的生产化扩展，详细内容在独立文档中，此处只列核心入口。
+
+**规范文档**：`docs/conventions/01_步骤13-17开发规范.md`（必读，Step 13 开工前）
+
+**每步开工前额外检查**（在 §九「假设清单」阶段执行）：
+
+- 新可调参数 → 必须进 `pkg/config/config.go`（§七 Config-First 规则）
+- 新 Redis 写操作 → 读后写必须用 Lua
+- 新 Consumer → 必须套 `DrainChan` + cfg 注入模板
+- 本步是否影响 PRD v3.0 某章节 → 在故事线中标记"PRD v3.0 §N 需更新"
+- 偏离点 → 追加到 `docs/conventions/01_步骤13-17开发规范.md §三·3.3` 偏离点追踪表
+
+**PRD v3.0 生成时机**：Step 17 收尾时，以下文件是唯一输入：
+
+```
+docs/progress/*/「本步与PRD的偏离点」章节（全部步骤）
+docs/audit/01_架构体检-Step12后.md
+docs/changes/0N_*.md（全部）
+docs/storylines/0N_*.md（全部）
+docs/conventions/01_步骤13-17开发规范.md
+```
+
+PRD v3.0 落地路径：`docs/prd/PRD-Final-v3.0.md`
 
 ---
 

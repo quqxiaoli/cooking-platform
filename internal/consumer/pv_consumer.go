@@ -48,26 +48,29 @@ import (
 	"time"
 
 	"cooking-platform/internal/event"
+	"cooking-platform/pkg/config"
 
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
-const (
-	pvBatchSize     = 100
-	pvFlushInterval = 5 * time.Second
-	pvChannelBuf    = pvBatchSize * 4
-)
-
 // PVConsumer subscribes to TopicPV and batches view increments.
 type PVConsumer struct {
-	bus event.EventSubscriber
-	db  *gorm.DB
+	bus           event.EventSubscriber
+	db            *gorm.DB
+	batchSize     int
+	flushInterval time.Duration
 }
 
 // NewPVConsumer constructs a PVConsumer.
-func NewPVConsumer(bus event.EventSubscriber, db *gorm.DB) *PVConsumer {
-	return &PVConsumer{bus: bus, db: db}
+// cfg provides batch/flush knobs previously hardcoded as package-level constants.
+func NewPVConsumer(bus event.EventSubscriber, db *gorm.DB, cfg config.PVConsumerConfig) *PVConsumer {
+	return &PVConsumer{
+		bus:           bus,
+		db:            db,
+		batchSize:     cfg.BatchSize,
+		flushInterval: cfg.FlushInterval,
+	}
 }
 
 // Name satisfies EventConsumer.
@@ -77,7 +80,7 @@ func (c *PVConsumer) Name() string {
 
 // Start blocks until ctx is cancelled.
 func (c *PVConsumer) Start(ctx context.Context) error {
-	eventCh := make(chan int64, pvChannelBuf) // post_id directly; no need for full struct
+	eventCh := make(chan int64, c.batchSize*4) // post_id directly; no need for full struct
 
 	var subWg sync.WaitGroup
 	subWg.Add(1)
@@ -104,10 +107,10 @@ func (c *PVConsumer) Start(ctx context.Context) error {
 
 // flushLoop accumulates per-post counts and flushes on cap or tick.
 func (c *PVConsumer) flushLoop(ctx context.Context, eventCh chan int64, subWg *sync.WaitGroup) {
-	deltas := make(map[int64]int64, pvBatchSize)
+	deltas := make(map[int64]int64, c.batchSize)
 	bufCount := 0
 
-	ticker := time.NewTicker(pvFlushInterval)
+	ticker := time.NewTicker(c.flushInterval)
 	defer ticker.Stop()
 
 	totalProcessed := 0
@@ -117,31 +120,25 @@ func (c *PVConsumer) flushLoop(ctx context.Context, eventCh chan int64, subWg *s
 		case postID := <-eventCh:
 			deltas[postID]++
 			bufCount++
-			if bufCount >= pvBatchSize {
+			if bufCount >= c.batchSize {
 				totalProcessed += c.flush(ctx, deltas)
-				deltas = make(map[int64]int64, pvBatchSize)
+				deltas = make(map[int64]int64, c.batchSize)
 				bufCount = 0
 			}
 
 		case <-ticker.C:
 			if bufCount > 0 {
 				totalProcessed += c.flush(ctx, deltas)
-				deltas = make(map[int64]int64, pvBatchSize)
+				deltas = make(map[int64]int64, c.batchSize)
 				bufCount = 0
 			}
 
 		case <-ctx.Done():
 			subWg.Wait()
-		drainLoop:
-			for {
-				select {
-				case postID := <-eventCh:
-					deltas[postID]++
-					bufCount++
-				default:
-					break drainLoop
-				}
-			}
+			DrainChan(eventCh, func(postID int64) {
+				deltas[postID]++
+				bufCount++
+			})
 			if bufCount > 0 {
 				totalProcessed += c.flush(context.Background(), deltas)
 			}

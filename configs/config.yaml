@@ -103,3 +103,24 @@ ratelimit:
   sms_phone_window: 60s
   sms_per_phone_per_day: 5
   sms_per_ip_per_day: 10
+
+# [Step 13] Consumer batch/flush tuning.
+# Exposed here so RabbitMQ production tuning requires only a config change + restart.
+consumer:
+  like:
+    batch_size: 50
+    flush_interval: 3s
+  pv:
+    batch_size: 100
+    flush_interval: 5s
+  count:
+    batch_size: 20
+    flush_interval: 10s
+
+# [Step 13] Cache TTLs.
+# Exposed here so TTL adjustments (e.g. shorter PV dedup for high-traffic events)
+# require only a config change + restart.
+cache:
+  like_state_ttl: 168h   # 7 days — see like_cache.go for rationale
+  feed_cache_ttl: 5m     # per feed page; shorter = fresher but more DB load
+  pv_dedup_ttl: 1h       # PRD-Phase2 §6 F-I02 AC-2
