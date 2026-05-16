@@ -1,5 +1,16 @@
 // Package errcode defines all application-level error codes and the AppError type.
-// Convention: XYYZZZ where X=category(4=client,5=server), YY=module, ZZZ=sequence.
+//
+// Numbering scheme: XYYZZZ
+//   - X   : HTTP category prefix (4 = client-facing, 5 = server-internal)
+//   - YY  : module (00=general, 10=user, 12=post, 40=follow, 50=search, 60=upload, 70=audit, 80=encryption)
+//   - ZZZ : per-module sequence
+//
+// Modules 70 and 80 are server-internal infrastructure errors (HTTP 500).
+// Their X prefix is 4 by convention (consistent with all other modules); the
+// HTTP status is determined solely by the AppError.HTTPStatus field.
+//
+// Audit (470xxx) and Encryption (480xxx) codes are never returned to HTTP
+// callers — they exist for structured log tagging and Prometheus alerting only.
 package errcode
 
 import (
@@ -26,7 +37,7 @@ func New(httpStatus, code int, msg string) *AppError {
 // ── Success ─────────────────────────────────────────────────────────────────
 const Success = 0
 
-// ── 4xx Client Errors ───────────────────────────────────────────────────────
+// ── General (code segment 400xxx / 401xxx / 403xxx / 404xxx / 429xxx / 500xxx / 503xxx) ──
 var (
 	ErrInvalidParams = New(http.StatusBadRequest, 400001, "invalid request parameters")
 	ErrUnauthorized  = New(http.StatusUnauthorized, 401001, "unauthorized")
@@ -35,18 +46,13 @@ var (
 	ErrForbidden     = New(http.StatusForbidden, 403001, "forbidden")
 	ErrNotFound      = New(http.StatusNotFound, 404001, "resource not found")
 	ErrTooManyReq    = New(http.StatusTooManyRequests, 429001, "too many requests")
-)
-
-// ── 5xx Server Errors ───────────────────────────────────────────────────────
-var (
-	ErrServer         = New(http.StatusInternalServerError, 500001, "internal server error")
-	ErrDatabase       = New(http.StatusInternalServerError, 500002, "database error")
-	ErrCacheError     = New(http.StatusInternalServerError, 500003, "cache error")
+	ErrServer        = New(http.StatusInternalServerError, 500001, "internal server error")
+	ErrDatabase      = New(http.StatusInternalServerError, 500002, "database error")
+	ErrCacheError    = New(http.StatusInternalServerError, 500003, "cache error")
 	ErrServiceUnavail = New(http.StatusServiceUnavailable, 503001, "service unavailable")
 )
 
-// ── User Module (4xx, code segment 41xxxx) ──────────────────────────────────
-// [Step 3] Defined alongside user registration / login / profile.
+// ── User Module (code segment 410xxx) ───────────────────────────────────────
 var (
 	ErrPhoneFormat      = New(http.StatusBadRequest, 410101, "invalid phone number format")
 	ErrCodeFormat       = New(http.StatusBadRequest, 410102, "invalid verification code format")
@@ -62,13 +68,8 @@ var (
 	ErrAvatarURLInvalid = New(http.StatusBadRequest, 410112, "invalid avatar URL")
 )
 
-// ── Post Module (4xx, code segment 412xxx) ─────────────────────────────────
-// [Step 4] Defined alongside post creation / feed / detail / author page.
-//
-// Numbering convention: user module owns 410xxx, post module owns 412xxx.
-// 411xxx is reserved for a future user-extension area (e.g. account
-// recovery, device management) so we don't fragment numbering when those
-// land. Numbering scheme matches errcode.go's header: XYYZZZ.
+// ── Post Module (code segment 412xxx) ───────────────────────────────────────
+// 411xxx is reserved for future user-extension (account recovery, device mgmt).
 var (
 	ErrTitleEmpty      = New(http.StatusBadRequest, 412101, "title cannot be empty")
 	ErrTitleTooLong    = New(http.StatusBadRequest, 412102, "title exceeds 100 characters")
@@ -80,27 +81,8 @@ var (
 	ErrContentTooLong  = New(http.StatusBadRequest, 412108, "content exceeds 5000 characters")
 )
 
-// ── Search Module (4xx, code segment 450xxx) ───────────────────────────────
-// [Step 7] Defined alongside full-text keyword search.
-//
-// Numbering note: this module takes the full 450xxx block. Steps 3-4 used a
-// tighter 41Zxxx layout (user=410, post=412, 411 reserved) which crowded
-// modules together. From Step 7 on, each new module owns a clean 4MM xxx
-// block — search=450, follow=440, upload=460, audit=470 — so segments never
-// collide and the allocation is obvious. The 41x↔45x width inconsistency
-// with the earlier modules is a known cosmetic debt, to be reconciled in
-// Step 12's error-code consolidation. Numbering scheme stays XYYZZZ.
-var (
-	ErrSearchKeywordEmpty  = New(http.StatusBadRequest, 450101, "search keyword cannot be empty")
-	ErrSearchCursorInvalid = New(http.StatusBadRequest, 450102, "invalid search cursor")
-)
-
-// ── Follow Module (4xx, code segment 440xxx) ───────────────────────────────
-// [Step 8] Defined alongside follow / unfollow / follower-list / following-list.
-//
-// Reused codes (NOT redefined here):
-//   - target user does not exist → 410108 ErrUserNotFound
-//   - caller not logged in       → 401001 ErrUnauthorized (middleware.Auth)
+// ── Follow Module (code segment 440xxx) ─────────────────────────────────────
+// Reused codes: ErrUserNotFound (410108), ErrUnauthorized (401001).
 var (
 	ErrCannotFollowSelf    = New(http.StatusBadRequest, 440101, "cannot follow yourself")
 	ErrFollowLimitExceeded = New(http.StatusBadRequest, 440102, "following limit reached (max 3000)")
@@ -108,21 +90,15 @@ var (
 	ErrFollowCursorInvalid = New(http.StatusBadRequest, 440104, "invalid follow list cursor")
 )
 
-// ── Upload Module (4xx, code segment 460xxx) ───────────────────────────────
-// [Step 9] Defined alongside OSS presign / callback and the image fields
-// they unlock on user profiles and posts.
-//
-// Numbering: upload module owns the full 460xxx block, per the "each new
-// module owns a clean 4MMxxx block" convention adopted from Step 7.
-//
-// Reused codes (NOT redefined here):
-//   - caller not logged in → 401001 ErrUnauthorized (middleware.Auth)
-//   - global rate limit    → 429001 ErrTooManyReq   (middleware.RateLimit)
-//   - avatar URL parse fail on UpdateProfile path  → 410112 ErrAvatarURLInvalid
-//     is reused when the supplied
-//     string is otherwise malformed;
-//     460105 is used when the URL
-//     is parseable but off-host.
+// ── Search Module (code segment 450xxx) ─────────────────────────────────────
+// Reused codes: ErrTooManyReq (429001).
+var (
+	ErrSearchKeywordEmpty  = New(http.StatusBadRequest, 450101, "search keyword cannot be empty")
+	ErrSearchCursorInvalid = New(http.StatusBadRequest, 450102, "invalid search cursor")
+)
+
+// ── Upload Module (code segment 460xxx) ─────────────────────────────────────
+// Reused codes: ErrUnauthorized (401001), ErrTooManyReq (429001).
 var (
 	ErrUploadFileType        = New(http.StatusBadRequest, 460101, "unsupported file type")
 	ErrUploadFileTooLarge    = New(http.StatusBadRequest, 460102, "file exceeds size limit")
@@ -132,21 +108,17 @@ var (
 	ErrPostStepsInvalid      = New(http.StatusBadRequest, 460106, "post steps invalid")
 )
 
-// ── Audit Module (5xx, code segment 470xxx) ────────────────────────────────
-// [Step 10] Internal errors emitted by AuditConsumer. Never returned to HTTP
-// callers — audit runs fully async. Codes exist for structured log tagging
-// so Prometheus / Grafana can alert on audit pipeline failures.
-//
-// Reused codes (NOT redefined here):
-//   - caller not logged in → 401001 ErrUnauthorized
-//   - resource not found   → 404001 ErrNotFound
+// ── Audit Module (code segment 470xxx, HTTP 500) ─────────────────────────────
+// Internal errors emitted by AuditConsumer. Never returned to HTTP callers —
+// audit runs fully async. Codes exist for structured log tagging so
+// Prometheus / Grafana can alert on audit pipeline failures.
 var (
 	ErrAuditAPIFailed   = New(http.StatusInternalServerError, 470101, "content safety API call failed")
 	ErrAuditWriteFailed = New(http.StatusInternalServerError, 470102, "audit result write failed")
 )
 
-// ── Encryption Module (5xx, code segment 480xxx) ───────────────────────────
-// [Step 11] AES-GCM phone field-level encryption errors. Never returned to
+// ── Encryption Module (code segment 480xxx, HTTP 500) ────────────────────────
+// Internal errors for AES-GCM phone field-level encryption. Never returned to
 // HTTP callers — encryption is transparent infrastructure. Codes exist for
 // structured log tagging (Prometheus alert on key misconfiguration).
 var (

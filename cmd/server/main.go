@@ -308,6 +308,7 @@ func setupRouter(
 	//   RequestID → must precede Logger so log lines carry the ID.
 	r.Use(middleware.Recovery())
 	r.Use(middleware.RequestID())
+	r.Use(middleware.Security())
 	r.Use(middleware.Logger())
 	r.Use(middleware.CORS())
 

@@ -276,7 +276,7 @@ func (s *UserService) GetMyProfile(ctx context.Context, userID int64) (*dto.User
 	}
 	resp := dto.UserPrivateResp{
 		UserPublicResp: toPublicResp(user),
-		PhoneMasked:    maskPhone(plain),
+		PhoneMasked:    crypto.MaskPhone(plain),
 	}
 	return &resp, nil
 }
@@ -421,13 +421,6 @@ func defaultNickname(phone string) string {
 		return "厨友"
 	}
 	return "厨友" + phone[len(phone)-4:]
-}
-
-func maskPhone(phone string) string {
-	if len(phone) < 7 {
-		return phone
-	}
-	return phone[:3] + "****" + phone[len(phone)-4:]
 }
 
 func toPublicResp(u *model.User) dto.UserPublicResp {
