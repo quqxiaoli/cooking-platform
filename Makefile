@@ -19,7 +19,7 @@ V        ?= 0   # set V=1 to also remove volumes on docker-down
 .PHONY: all build run test test-cover lint lint-fix \
         check-migrate migrate-up migrate-down migrate-status migrate-force migrate-create \
         docker-up docker-down docker-logs docker-ps \
-        verify-step7 verify-step11 verify-step12 verify-step13 verify-step14 migrate-phone migrate-phone-dry \
+        verify-step7 verify-step11 verify-step12 verify-step13 verify-step14 verify-step15 migrate-phone migrate-phone-dry \
         clean deps help
 # ── Default ───────────────────────────────────────────────────────────────────
 all: build
@@ -155,6 +155,10 @@ verify-step13: ## 运行 Step 13 EventBus RabbitMQ 生产加固端到端验证
 .PHONY: verify-step14
 verify-step14: ## 运行 Step 14 MySQL 主从复制 + DBResolver 读写分离端到端验证
 	@bash scripts/verify_step14.sh
+
+.PHONY: verify-step15
+verify-step15: ## 运行 Step 15 Nginx 双实例负载均衡端到端验证
+	@bash scripts/verify_step15.sh
 
 ## migrate-phone: 一次性迁移 phone_encrypted 为 AES-GCM 密文（需设 APP_ENCRYPTION_PHONE_KEY）
 .PHONY: migrate-phone

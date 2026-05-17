@@ -1,0 +1,101 @@
+# configs/config.docker.yaml — Docker internal network configuration.
+# Loaded when CONFIG_PATH=configs/config.docker.yaml (set in docker-compose.yml app1/app2).
+# Connection strings point to Docker service names instead of 127.0.0.1.
+# All other values are identical to config.yaml dev defaults.
+
+server:
+  port: 8080
+  mode: debug
+  read_timeout: 10s
+  write_timeout: 10s
+  idle_timeout: 60s
+
+database:
+  # Docker service name: mysql (master, port 3306 internal)
+  dsn: "root:cooking123@tcp(mysql:3306)/cooking_platform?charset=utf8mb4&parseTime=True&loc=Local&timeout=5s"
+  # Docker service name: mysql-slave (port 3306 internal)
+  slaves_dsn:
+    - "root:cooking123@tcp(mysql-slave:3306)/cooking_platform?charset=utf8mb4&parseTime=True&loc=Local&timeout=5s"
+  max_open_conns: 25
+  max_idle_conns: 10
+  max_lifetime: 5m
+  max_idle_time: 5m
+  log_level: info
+
+redis:
+  # Docker service name: redis
+  addr: "redis:6379"
+  password: ""
+  db: 0
+  pool_size: 10
+  dial_timeout: 5s
+  read_timeout: 3s
+  write_timeout: 3s
+
+log:
+  level: debug
+  console: true   # stdout → Docker log driver; file rotation not needed in containers
+  filename: /var/log/cooking/app.log
+  max_size: 100
+  max_backups: 7
+  max_age: 30
+  compress: true
+
+jwt:
+  secret: "dev-jwt-secret-change-in-production-min-32-chars"
+  access_token_ttl: 2h
+  refresh_token_ttl: 168h
+
+mq:
+  # Use RabbitMQ since the rabbitmq service is available on the Docker network.
+  # dev config.yaml uses channel to avoid requiring RabbitMQ for local go run.
+  provider: rabbitmq
+  url: "amqp://cooking:cooking123@rabbitmq:5672/"
+  timeout: 5s
+  reconnect_max_retries: 5
+  reconnect_initial_delay: 1s
+
+sms:
+  provider: mock
+  code_length: 6
+  code_ttl: 5m
+
+audit:
+  provider: mock
+  mock_result: pass
+  region: cn-shanghai
+
+oss:
+  provider: mock
+  bucket: cooking-dev
+  # Mock listener binds to container localhost; presign URLs are container-local only.
+  url_prefix: "http://127.0.0.1:18080/"
+  presign_ttl: 15m
+  max_image_size: 5242880
+  upload_hourly: 30
+  mock_listen_addr: "127.0.0.1:18080"
+
+encryption:
+  phone_key: ""
+  phone_pepper: ""
+
+ratelimit:
+  sms_phone_window: 60s
+  sms_per_phone_per_day: 5
+  sms_per_ip_per_day: 10
+
+consumer:
+  like:
+    batch_size: 50
+    flush_interval: 3s
+  pv:
+    batch_size: 100
+    flush_interval: 5s
+  count:
+    batch_size: 20
+    flush_interval: 10s
+
+cache:
+  like_state_ttl: 168h
+  feed_cache_ttl: 5m
+  pv_dedup_ttl: 1h

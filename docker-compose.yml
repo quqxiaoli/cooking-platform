@@ -115,6 +115,81 @@ services:
     networks:
       - cooking-dev-net
 
+  # ── Go application instances (Step 15) ───────────────────────────────────
+  # app1 and app2 are identical; Docker network isolation means both can bind
+  # to port 8080 inside their own containers without conflict.
+  # Neither exposes a host port — all external traffic goes through Nginx.
+  app1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cooking-app1-dev
+    restart: unless-stopped
+    environment:
+      CONFIG_PATH: configs/config.docker.yaml
+    depends_on:
+      mysql:
+        condition: service_healthy
+      mysql-slave:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - cooking-dev-net
+
+  app2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cooking-app2-dev
+    restart: unless-stopped
+    environment:
+      CONFIG_PATH: configs/config.docker.yaml
+    depends_on:
+      mysql:
+        condition: service_healthy
+      mysql-slave:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - cooking-dev-net
+
+  # ── Nginx reverse proxy (Step 15) ─────────────────────────────────────────
+  # Exposes port 80 to the host; load-balances between app1 and app2.
+  # Round-robin is the Nginx default; keepalive 32 reuses upstream connections.
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: cooking-nginx-dev
+    restart: unless-stopped
+    ports:
+      - "80:80"   # only Nginx is exposed; app1/app2 are internal
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      app1:
+        condition: service_healthy
+      app2:
+        condition: service_healthy
+    networks:
+      - cooking-dev-net
+
   # ── RabbitMQ 3.x (management plugin) ─────────────────────────────────────
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
