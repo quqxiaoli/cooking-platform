@@ -5,6 +5,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -207,11 +208,18 @@ type RatelimitConfig struct {
 func Load() (*Config, error) {
 	v := viper.New()
 
-	// File source.
-	v.SetConfigName("config")
-	v.SetConfigType("yaml")
-	v.AddConfigPath("configs")
-	v.AddConfigPath(".") // allow running from project root
+	// File source. CONFIG_PATH env var selects an explicit config file
+	// (e.g. Docker deployments use configs/config.docker.yaml to point at
+	// internal network hostnames without rebuilding the image).
+	// Falls back to the standard configs/config.yaml search path.
+	if configPath := os.Getenv("CONFIG_PATH"); configPath != "" {
+		v.SetConfigFile(configPath)
+	} else {
+		v.SetConfigName("config")
+		v.SetConfigType("yaml")
+		v.AddConfigPath("configs")
+		v.AddConfigPath(".") // allow running from project root
+	}
 
 	// Environment overrides: APP_SERVER_PORT → server.port
 	v.SetEnvPrefix("APP")

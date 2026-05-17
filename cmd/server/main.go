@@ -320,6 +320,7 @@ func setupRouter(
 	// Infrastructure routes (no auth required).
 	r.GET("/health", healthHandler.Health)
 	r.GET("/readiness", healthHandler.Readiness)
+	r.GET("/health/ready", healthHandler.Readiness) // Nginx upstream health check alias
 
 	// ── /api/v1 group ─────────────────────────────────────────────────────────
 	v1 := r.Group("/api/v1")
