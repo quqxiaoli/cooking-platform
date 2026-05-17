@@ -19,7 +19,7 @@ V        ?= 0   # set V=1 to also remove volumes on docker-down
 .PHONY: all build run test test-cover lint lint-fix \
         check-migrate migrate-up migrate-down migrate-status migrate-force migrate-create \
         docker-up docker-down docker-logs docker-ps \
-        verify-step7 verify-step11 verify-step12 verify-step13 verify-step14 verify-step15 verify-step16 migrate-phone migrate-phone-dry \
+        verify-step7 verify-step11 verify-step12 verify-step13 verify-step14 verify-step15 verify-step16 verify-step17 migrate-phone migrate-phone-dry \
         clean deps help
 # ── Default ───────────────────────────────────────────────────────────────────
 all: build
@@ -164,6 +164,11 @@ verify-step15: ## 运行 Step 15 Nginx 双实例负载均衡端到端验证
 .PHONY: verify-step16
 verify-step16: ## 运行 Step 16 Prometheus + Grafana 监控端到端验证
 	@bash scripts/verify_step16.sh
+
+## verify-step17: 运行 Step 17 GitHub Actions CI/CD 验证
+.PHONY: verify-step17
+verify-step17: ## 运行 Step 17 GitHub Actions CI/CD + PRD v3.0 验证
+	@bash scripts/verify_step17.sh
 
 ## migrate-phone: 一次性迁移 phone_encrypted 为 AES-GCM 密文（需设 APP_ENCRYPTION_PHONE_KEY）
 .PHONY: migrate-phone
