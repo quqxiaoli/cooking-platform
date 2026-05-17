@@ -19,7 +19,7 @@ V        ?= 0   # set V=1 to also remove volumes on docker-down
 .PHONY: all build run test test-cover lint lint-fix \
         check-migrate migrate-up migrate-down migrate-status migrate-force migrate-create \
         docker-up docker-down docker-logs docker-ps \
-        verify-step7 verify-step11 verify-step12 verify-step13 verify-step14 verify-step15 migrate-phone migrate-phone-dry \
+        verify-step7 verify-step11 verify-step12 verify-step13 verify-step14 verify-step15 verify-step16 migrate-phone migrate-phone-dry \
         clean deps help
 # ── Default ───────────────────────────────────────────────────────────────────
 all: build
@@ -96,7 +96,7 @@ migrate-create:
 # ── Docker ────────────────────────────────────────────────────────────────────
 ## docker-up: start dev infrastructure (MySQL + Redis) in background
 docker-up:
-	docker compose -f $(DC_FILE) up -d --wait
+	docker compose -f $(DC_FILE) up -d --wait --build
 	@echo ""
 	@echo "✅  MySQL  → localhost:3306  (root / cooking123)"
 	@echo "✅  Redis  → localhost:6379  (no password)"
@@ -159,6 +159,11 @@ verify-step14: ## 运行 Step 14 MySQL 主从复制 + DBResolver 读写分离端
 .PHONY: verify-step15
 verify-step15: ## 运行 Step 15 Nginx 双实例负载均衡端到端验证
 	@bash scripts/verify_step15.sh
+
+## verify-step16: 运行 Step 16 Prometheus + Grafana 监控端到端验证
+.PHONY: verify-step16
+verify-step16: ## 运行 Step 16 Prometheus + Grafana 监控端到端验证
+	@bash scripts/verify_step16.sh
 
 ## migrate-phone: 一次性迁移 phone_encrypted 为 AES-GCM 密文（需设 APP_ENCRYPTION_PHONE_KEY）
 .PHONY: migrate-phone

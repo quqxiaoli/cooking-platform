@@ -1,0 +1,17 @@
+global:
+  scrape_interval: 15s       # how often to scrape targets
+  evaluation_interval: 15s   # how often to evaluate rules
+
+# Scrape targets.
+# app1 and app2 are reached via Docker internal network (service names).
+# We scrape both instances directly, bypassing Nginx, so per-instance metrics
+# (goroutine counts, GC pause) are distinguishable.
+scrape_configs:
+  - job_name: cooking-platform
+    static_configs:
+      - targets:
+          - app1:8080
+          - app2:8080
+    metrics_path: /metrics
+    # instance label will be "app1:8080" / "app2:8080" by default;
+    # allows Grafana to filter panels per instance.

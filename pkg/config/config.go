@@ -27,6 +27,7 @@ type Config struct {
 	Ratelimit  RatelimitConfig  `mapstructure:"ratelimit"`  // [Step 3] generic rate limit knobs
 	Consumer   ConsumerConfig   `mapstructure:"consumer"`   // [Step 13] per-consumer batch/flush tuning
 	Cache      CacheConfig      `mapstructure:"cache"`      // [Step 13] Redis TTL knobs
+	Metrics    MetricsConfig    `mapstructure:"metrics"`    // [Step 16] Prometheus metrics
 }
 
 type ServerConfig struct {
@@ -189,6 +190,15 @@ type CacheConfig struct {
 	PVDedupTTL   time.Duration `mapstructure:"pv_dedup_ttl"`   // pv:dup:* dedup window
 }
 
+// MetricsConfig controls Prometheus metric exposition (added in Step 16).
+//
+// Namespace prefixes all metric names: "cooking" → cooking_http_requests_total.
+// When Enabled=false the /metrics route is not registered; no scraping overhead.
+type MetricsConfig struct {
+	Enabled   bool   `mapstructure:"enabled"`   // default true
+	Namespace string `mapstructure:"namespace"` // default "cooking"
+}
+
 // RatelimitConfig holds knobs that apply to *generic* rate-limit middleware
 // usage across the codebase. SMS-specific three-dimension limits are NOT here
 // — they are encoded in user_service because they cannot be expressed as a
@@ -318,6 +328,10 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("cache.like_state_ttl", "168h") // 7 days
 	v.SetDefault("cache.feed_cache_ttl", "5m")
 	v.SetDefault("cache.pv_dedup_ttl", "1h")
+
+	// [Step 16] Metrics defaults.
+	v.SetDefault("metrics.enabled", true)
+	v.SetDefault("metrics.namespace", "cooking")
 }
 
 func validate(cfg *Config) error {

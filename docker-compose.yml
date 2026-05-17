@@ -213,6 +213,53 @@ services:
     networks:
       - cooking-dev-net
 
+  # ── Prometheus (Step 16) ──────────────────────────────────────────────────
+  # Scrapes /metrics from app1 and app2 directly (internal Docker network).
+  # Nginx does NOT proxy /metrics — keeping the metrics endpoint off the public
+  # internet is an intentional security boundary.
+  prometheus:
+    image: prom/prometheus:v3.4.0
+    container_name: cooking-prometheus-dev
+    restart: unless-stopped
+    ports:
+      - "9090:9090"   # Prometheus UI at http://localhost:9090
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-dev-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"   # dev: 7-day retention
+      - "--web.enable-lifecycle"              # allow POST /-/reload for config reload
+    depends_on:
+      app1:
+        condition: service_healthy
+      app2:
+        condition: service_healthy
+    networks:
+      - cooking-dev-net
+
+  # ── Grafana (Step 16) ─────────────────────────────────────────────────────
+  # Auto-provisions Prometheus datasource and the cooking-platform dashboard
+  # from deploy/grafana/provisioning/.
+  grafana:
+    image: grafana/grafana:12.0.1
+    container_name: cooking-grafana-dev
+    restart: unless-stopped
+    ports:
+      - "3000:3000"   # Grafana UI at http://localhost:3000 (admin/admin)
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin   # dev only; override via env in prod
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-dev-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - cooking-dev-net
+
 volumes:
   mysql-dev-data:
     driver: local
@@ -220,6 +267,10 @@ volumes:
   mysql-slave-dev-data:
     driver: local
   rabbitmq-dev-data:
+    driver: local
+  prometheus-dev-data:
+    driver: local
+  grafana-dev-data:
     driver: local
 
 networks:

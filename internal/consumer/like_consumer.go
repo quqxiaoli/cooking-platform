@@ -75,6 +75,7 @@ import (
 	"cooking-platform/internal/model"
 	"cooking-platform/internal/repository"
 	"cooking-platform/pkg/config"
+	"cooking-platform/pkg/metrics"
 
 	"go.uber.org/zap"
 )
@@ -147,6 +148,9 @@ func (c *LikeConsumer) Start(ctx context.Context) error {
 			// here propagates backpressure to the bus.
 			select {
 			case eventCh <- likeBatchEvent{action: actionLike, userID: p.UserID, postID: p.PostID}:
+				if metrics.ConsumerProcessedTotal != nil {
+					metrics.ConsumerProcessedTotal.WithLabelValues(c.Name(), event.TopicLike).Inc()
+				}
 			case <-ctx.Done():
 				return nil
 			}
@@ -165,6 +169,9 @@ func (c *LikeConsumer) Start(ctx context.Context) error {
 			}
 			select {
 			case eventCh <- likeBatchEvent{action: actionUnlike, userID: p.UserID, postID: p.PostID}:
+				if metrics.ConsumerProcessedTotal != nil {
+					metrics.ConsumerProcessedTotal.WithLabelValues(c.Name(), event.TopicUnlike).Inc()
+				}
 			case <-ctx.Done():
 				return nil
 			}
@@ -206,6 +213,9 @@ func (c *LikeConsumer) flushLoop(ctx context.Context, eventCh chan likeBatchEven
 		case <-ticker.C:
 			if len(likeBuf) > 0 || len(unlikeBuf) > 0 {
 				totalProcessed += c.flush(ctx, &likeBuf, &unlikeBuf)
+			}
+			if metrics.ConsumerQueueDepth != nil {
+				metrics.ConsumerQueueDepth.WithLabelValues(c.Name()).Set(float64(len(eventCh)))
 			}
 
 		case <-ctx.Done():

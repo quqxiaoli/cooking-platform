@@ -49,6 +49,7 @@ import (
 
 	"cooking-platform/internal/event"
 	"cooking-platform/pkg/config"
+	"cooking-platform/pkg/metrics"
 
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -94,6 +95,9 @@ func (c *PVConsumer) Start(ctx context.Context) error {
 			}
 			select {
 			case eventCh <- p.PostID:
+				if metrics.ConsumerProcessedTotal != nil {
+					metrics.ConsumerProcessedTotal.WithLabelValues(c.Name(), event.TopicPV).Inc()
+				}
 			case <-ctx.Done():
 				return nil
 			}
@@ -131,6 +135,9 @@ func (c *PVConsumer) flushLoop(ctx context.Context, eventCh chan int64, subWg *s
 				totalProcessed += c.flush(ctx, deltas)
 				deltas = make(map[int64]int64, c.batchSize)
 				bufCount = 0
+			}
+			if metrics.ConsumerQueueDepth != nil {
+				metrics.ConsumerQueueDepth.WithLabelValues(c.Name()).Set(float64(len(eventCh)))
 			}
 
 		case <-ctx.Done():

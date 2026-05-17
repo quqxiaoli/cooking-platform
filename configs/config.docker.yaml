@@ -99,3 +99,8 @@ cache:
   like_state_ttl: 168h
   feed_cache_ttl: 5m
   pv_dedup_ttl: 1h
+
+# [Step 16] Prometheus — identical to dev; namespace always "cooking".
+metrics:
+  enabled: true
+  namespace: cooking

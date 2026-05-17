@@ -49,11 +49,14 @@ import (
 	"cooking-platform/pkg/config"
 	jwtpkg "cooking-platform/pkg/jwt"
 	"cooking-platform/pkg/logger"
+	"cooking-platform/pkg/metrics"
 	"cooking-platform/pkg/oss"
 	"cooking-platform/pkg/sms"
 	customvalidator "cooking-platform/pkg/validator"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	goredis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"gorm.io/driver/mysql"
@@ -86,6 +89,14 @@ func main() {
 		zap.String("oss_provider", cfg.OSS.Provider),
 	)
 
+	// ── 2.5 [Step 16] Prometheus metrics initialisation ───────────────────────
+	// Must happen before any metric is observed (consumers, middleware, etc.).
+	// When cfg.Metrics.Enabled=false we skip Init so /metrics is never registered.
+	if cfg.Metrics.Enabled {
+		metrics.Init(cfg.Metrics.Namespace)
+		log.Info("prometheus metrics initialised", zap.String("namespace", cfg.Metrics.Namespace))
+	}
+
 	// ── 3. MySQL ──────────────────────────────────────────────────────────────
 	db, err := initMySQL(cfg.Database)
 	if err != nil {
@@ -93,12 +104,28 @@ func main() {
 	}
 	log.Info("mysql connected")
 
+	// ── 3.5 [Step 16] MySQL pool collector ───────────────────────────────────
+	// Registers a pull-based Prometheus collector that reads sql.DB.Stats()
+	// on every scrape — no goroutine or periodic timer needed.
+	if cfg.Metrics.Enabled {
+		sqlDB, dbErr := db.DB()
+		if dbErr == nil {
+			prometheus.MustRegister(metrics.NewMySQLPoolCollector(cfg.Metrics.Namespace, sqlDB))
+		}
+	}
+
 	// ── 4. Redis ──────────────────────────────────────────────────────────────
 	rdb, err := initRedis(cfg.Redis)
 	if err != nil {
 		log.Fatal("init redis", zap.Error(err))
 	}
 	log.Info("redis connected")
+
+	// ── 4.5 [Step 16] Redis metrics hook ─────────────────────────────────────
+	// AddHook wraps every command call; latency is recorded in RedisCommandDuration.
+	if cfg.Metrics.Enabled {
+		rdb.AddHook(metrics.NewRedisHook())
+	}
 
 	// ── 5. EventBus ───────────────────────────────────────────────────────────
 	bus, err := initEventBus(cfg.MQ)
@@ -208,7 +235,7 @@ func main() {
 	// HealthHandler is created here so setupRouter does not need *gorm.DB.
 	healthHandler := handler.NewHealthHandler(db, rdb)
 	gin.SetMode(cfg.Server.Mode)
-	engine := setupRouter(rdb, userSvc, healthHandler, userHandler, postHandler, feedHandler, likeHandler, searchHandler, followHandler, uploadHandler)
+	engine := setupRouter(rdb, userSvc, healthHandler, userHandler, postHandler, feedHandler, likeHandler, searchHandler, followHandler, uploadHandler, cfg.Metrics.Enabled)
 
 	// ── 10. HTTP server ───────────────────────────────────────────────────────
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
@@ -291,6 +318,7 @@ func main() {
 //   - rdb: Redis client used only for rate-limit middleware (RateLimitConfig.RDB).
 //   - tokenVerifier: satisfied by *service.UserService; decouples middleware from service.
 //   - healthHandler: pre-constructed in main() so setupRouter does not need *gorm.DB.
+//   - metricsEnabled: when true, register the /metrics endpoint and Metrics() middleware.
 //
 // Signature evolution: each new module adds its handler as a parameter.
 // Keep all routes in one function so the full API surface is visible at a glance.
@@ -305,22 +333,33 @@ func setupRouter(
 	searchHandler *handler.SearchHandler,
 	followHandler *handler.FollowHandler,
 	uploadHandler *handler.UploadHandler,
+	metricsEnabled bool,
 ) *gin.Engine {
 	r := gin.New()
 
 	// Global middlewares (order matters):
 	//   Recovery → must be first so it catches panics from everything below.
 	//   RequestID → must precede Logger so log lines carry the ID.
+	//   Metrics → after Recovery so panics are counted with status 5xx, not 0.
 	r.Use(middleware.Recovery())
 	r.Use(middleware.RequestID())
 	r.Use(middleware.Security())
 	r.Use(middleware.Logger())
 	r.Use(middleware.CORS())
+	if metricsEnabled {
+		r.Use(middleware.Metrics())
+	}
 
 	// Infrastructure routes (no auth required).
 	r.GET("/health", healthHandler.Health)
 	r.GET("/readiness", healthHandler.Readiness)
 	r.GET("/health/ready", healthHandler.Readiness) // Nginx upstream health check alias
+	if metricsEnabled {
+		// /metrics exposes Prometheus text format scraped by prometheus service.
+		// Not guarded by auth: Prometheus runs on the internal Docker network;
+		// Nginx does not proxy /metrics to the public internet.
+		r.GET("/metrics", gin.WrapH(promhttp.Handler()))
+	}
 
 	// ── /api/v1 group ─────────────────────────────────────────────────────────
 	v1 := r.Group("/api/v1")

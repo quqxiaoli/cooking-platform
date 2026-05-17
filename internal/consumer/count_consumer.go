@@ -77,6 +77,7 @@ import (
 
 	"cooking-platform/internal/event"
 	"cooking-platform/pkg/config"
+	"cooking-platform/pkg/metrics"
 
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -138,7 +139,7 @@ func (c *CountConsumer) Start(ctx context.Context) error {
 				zap.L().Warn("count consumer: unmarshal PostEvent", zap.Error(err))
 				return nil
 			}
-			c.send(ctx, eventCh, countDelta{userID: p.AuthorID, postCount: 1})
+			c.send(ctx, eventCh, countDelta{userID: p.AuthorID, postCount: 1}, event.TopicPost)
 			return nil
 		})
 	}()
@@ -152,7 +153,7 @@ func (c *CountConsumer) Start(ctx context.Context) error {
 				zap.L().Warn("count consumer: unmarshal LikeEvent", zap.Error(err))
 				return nil
 			}
-			c.send(ctx, eventCh, countDelta{userID: p.AuthorID, totalLikes: 1})
+			c.send(ctx, eventCh, countDelta{userID: p.AuthorID, totalLikes: 1}, event.TopicLike)
 			return nil
 		})
 	}()
@@ -166,7 +167,7 @@ func (c *CountConsumer) Start(ctx context.Context) error {
 				zap.L().Warn("count consumer: unmarshal UnlikeEvent", zap.Error(err))
 				return nil
 			}
-			c.send(ctx, eventCh, countDelta{userID: p.AuthorID, totalLikes: -1})
+			c.send(ctx, eventCh, countDelta{userID: p.AuthorID, totalLikes: -1}, event.TopicUnlike)
 			return nil
 		})
 	}()
@@ -181,8 +182,8 @@ func (c *CountConsumer) Start(ctx context.Context) error {
 				zap.L().Warn("count consumer: unmarshal FollowEvent", zap.Error(err))
 				return nil
 			}
-			c.send(ctx, eventCh, countDelta{userID: p.FollowerID, followingCount: 1})
-			c.send(ctx, eventCh, countDelta{userID: p.FollowingID, followerCount: 1})
+			c.send(ctx, eventCh, countDelta{userID: p.FollowerID, followingCount: 1}, event.TopicFollow)
+			c.send(ctx, eventCh, countDelta{userID: p.FollowingID, followerCount: 1}, event.TopicFollow)
 			return nil
 		})
 	}()
@@ -196,8 +197,8 @@ func (c *CountConsumer) Start(ctx context.Context) error {
 				zap.L().Warn("count consumer: unmarshal UnfollowEvent", zap.Error(err))
 				return nil
 			}
-			c.send(ctx, eventCh, countDelta{userID: p.FollowerID, followingCount: -1})
-			c.send(ctx, eventCh, countDelta{userID: p.FollowingID, followerCount: -1})
+			c.send(ctx, eventCh, countDelta{userID: p.FollowerID, followingCount: -1}, event.TopicUnfollow)
+			c.send(ctx, eventCh, countDelta{userID: p.FollowingID, followerCount: -1}, event.TopicUnfollow)
 			return nil
 		})
 	}()
@@ -210,9 +211,13 @@ func (c *CountConsumer) Start(ctx context.Context) error {
 // subscribe goroutine never blocks forever on a full channel during
 // shutdown. Extracted in Step 8 because the follow handlers each emit two
 // deltas — duplicating the select block four times was noise.
-func (c *CountConsumer) send(ctx context.Context, eventCh chan countDelta, d countDelta) {
+// topic is used only for metrics labelling; it may be empty string to skip.
+func (c *CountConsumer) send(ctx context.Context, eventCh chan countDelta, d countDelta, topic string) {
 	select {
 	case eventCh <- d:
+		if metrics.ConsumerProcessedTotal != nil && topic != "" {
+			metrics.ConsumerProcessedTotal.WithLabelValues(c.Name(), topic).Inc()
+		}
 	case <-ctx.Done():
 	}
 }
@@ -270,6 +275,9 @@ func (c *CountConsumer) flushLoop(ctx context.Context, eventCh chan countDelta, 
 
 		case <-ticker.C:
 			flush(ctx)
+			if metrics.ConsumerQueueDepth != nil {
+				metrics.ConsumerQueueDepth.WithLabelValues(c.Name()).Set(float64(len(eventCh)))
+			}
 
 		case <-ctx.Done():
 			subWg.Wait()

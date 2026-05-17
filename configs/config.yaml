@@ -131,3 +131,10 @@ cache:
   like_state_ttl: 168h   # 7 days — see like_cache.go for rationale
   feed_cache_ttl: 5m     # per feed page; shorter = fresher but more DB load
   pv_dedup_ttl: 1h       # PRD-Phase2 §6 F-I02 AC-2
+
+# [Step 16] Prometheus metrics exposition.
+# namespace prefixes all metric names: "cooking" → cooking_http_requests_total.
+# Disable in prod if Prometheus scraping is handled by a side-car instead.
+metrics:
+  enabled: true
+  namespace: cooking
