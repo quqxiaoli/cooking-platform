@@ -7,6 +7,7 @@ server:
   read_timeout: 10s
   write_timeout: 10s
   idle_timeout: 60s
+  shutdown_timeout: 30s   # [Step 18] LIFO shutdown total budget (HTTP 5s + Consumer/Bus 15s + Infra 5s + 5s slack)
 
 database:
   # Dev: root connects to the cooking_platform database exposed on localhost:3306.
@@ -75,6 +76,8 @@ audit:
   access_key_secret: ""   # env: APP_AUDIT_ACCESS_KEY_SECRET (aliyun only)
   region: cn-shanghai     # Aliyun Green service region (aliyun only)
   mock_result: pass       # dev only: pass | suspect | reject
+  timeout: 3s             # [Step 18] per-call timeout to upstream SDK
+  max_retries: 2          # [Step 18] retry budget for transient upstream errors
 
 # [Step 9] OSS provider configuration.
 # Dev uses 'mock' — pkg/oss/mock.go starts an embedded HTTP listener on
@@ -93,13 +96,18 @@ oss:
   upload_hourly: 30                           # per-user presign rate cap
   mock_listen_addr: "127.0.0.1:18080"
 
-# [Step 11] Phone field-level encryption.
-# Dev: both fields empty → phone_encrypted stores plaintext, phone_hash = SHA256(phone).
-# Prod: inject real values via APP_ENCRYPTION_PHONE_KEY / APP_ENCRYPTION_PHONE_PEPPER.
-# To generate a dev test key: openssl rand -hex 32
+# [Step 11+18] Phone field-level encryption.
+# Step 18 changed crypto/phone.go to fail-closed: empty phone_key now returns
+# ErrPhoneKeyMissing (480103) instead of silently storing plaintext. Dev gets
+# a committed test key below so login still works out of box; prod MUST inject
+# its own via env vars (config.Validate refuses release mode with empty key).
+# Generate a real key: openssl rand -hex 32  → phone_key (64 hex chars)
+#                      openssl rand -base64 32 → phone_pepper (arbitrary string)
 encryption:
-  phone_key: ""       # 64-char hex = 32-byte AES-256-GCM key; env: APP_ENCRYPTION_PHONE_KEY
-  phone_pepper: ""    # arbitrary secret appended before SHA-256; env: APP_ENCRYPTION_PHONE_PEPPER
+  # DEV ONLY — DO NOT USE IN PROD. Identical to test fixture so unit and
+  # integration test paths share a key without env-var plumbing.
+  phone_key: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+  phone_pepper: "dev-pepper-change-in-prod"
 
 # [Step 3] Rate-limit configuration.
 # Three-dimension SMS protection (enforced in internal/service/user_service.go):
@@ -128,9 +136,11 @@ consumer:
 # Exposed here so TTL adjustments (e.g. shorter PV dedup for high-traffic events)
 # require only a config change + restart.
 cache:
-  like_state_ttl: 168h   # 7 days — see like_cache.go for rationale
-  feed_cache_ttl: 5m     # per feed page; shorter = fresher but more DB load
-  pv_dedup_ttl: 1h       # PRD-Phase2 §6 F-I02 AC-2
+  like_state_ttl: 168h        # 7 days — see like_cache.go for rationale
+  feed_cache_ttl: 5m          # per feed page; shorter = fresher but more DB load
+  pv_dedup_ttl: 1h            # PRD-Phase2 §6 F-I02 AC-2
+  dedup_ttl: 24h              # Step 18 event-id SETNX dedup window (at-least-once → exactly-once)
+  user_sms_daily_ttl: 24h     # Step 18 USER-03 const → cfg (sms:limit:*, sms:ip:*)
 
 # [Step 16] Prometheus metrics exposition.
 # namespace prefixes all metric names: "cooking" → cooking_http_requests_total.
@@ -138,3 +148,22 @@ cache:
 metrics:
   enabled: true
   namespace: cooking
+
+# [Step 18] Search keyword tunables — previously consts in search_service.go.
+search:
+  max_keyword_len: 50
+  boolean_operators: '+-><()~*"@'
+
+# [Step 18] Follow module limits — previously consts in follow_service.go.
+follow:
+  max_following: 3000
+  default_list_size: 20
+  max_list_size: 50
+
+# [Step 18] CORS allow lists — previously hardcoded "*" in middleware/cors.go.
+# Dev is permissive; prod yaml MUST replace "*" with explicit origin list.
+cors:
+  allowed_origins: ["*"]
+  allowed_methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+  allowed_headers: ["Origin", "Content-Type", "Authorization", "X-Request-ID"]
+  expose_headers: ["X-Request-ID"]

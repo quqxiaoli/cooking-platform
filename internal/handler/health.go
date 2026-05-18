@@ -4,7 +4,6 @@ package handler
 
 import (
 	"context"
-	"net/http"
 	"time"
 
 	"cooking-platform/pkg/response"
@@ -76,10 +75,7 @@ func (h *HealthHandler) Readiness(c *gin.Context) {
 	}
 
 	// Return 503 so Nginx or k8s removes this instance from rotation.
-	c.JSON(http.StatusServiceUnavailable, gin.H{
-		"code":       503001,
-		"msg":        "service unavailable",
-		"data":       checks,
-		"request_id": c.GetString("X-Request-ID"),
-	})
+	// Uses the standard response.Unavailable envelope so the structure is
+	// identical to every other response in the API (Step 18 收口).
+	response.Unavailable(c, checks)
 }

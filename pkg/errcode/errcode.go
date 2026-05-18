@@ -1,13 +1,24 @@
 // Package errcode defines all application-level error codes and the AppError type.
 //
 // Numbering scheme: XYYZZZ
-//   - X   : HTTP category prefix (4 = client-facing, 5 = server-internal)
-//   - YY  : module (00=general, 10=user, 12=post, 40=follow, 50=search, 60=upload, 70=audit, 80=encryption)
+//   - X   : code-segment prefix
+//       - 4 : client-facing modules (10=user, 12=post, 40=follow, 50=search,
+//             60=upload), plus the general HTTP-4XX bucket (00=general).
+//       - 5 : server-internal / infra modules whose HTTP status is fixed at
+//             500 or 503 regardless of which module raised them.
+//             Today: 00=general (500xxx internal / 503xxx unavailable),
+//             but historically 470xxx and 480xxx also live under the X=4
+//             prefix and are also HTTP 500. The single source of truth for
+//             the HTTP status of an error is AppError.HTTPStatus, never the
+//             X digit.
+//   - YY  : module
 //   - ZZZ : per-module sequence
 //
-// Modules 70 and 80 are server-internal infrastructure errors (HTTP 500).
-// Their X prefix is 4 by convention (consistent with all other modules); the
-// HTTP status is determined solely by the AppError.HTTPStatus field.
+// Note on the X=4 vs X=5 inconsistency: audit (470xxx) and encryption (480xxx)
+// were originally placed under X=4 to keep all module codes co-located, even
+// though they are always HTTP 500. New 5xx-only modules SHOULD use X=5
+// (e.g. ErrServiceUnavail = 503001 lives in the X=5 bucket). The lesson is
+// "HTTP status is determined by AppError.HTTPStatus, not by the X digit".
 //
 // Audit (470xxx) and Encryption (480xxx) codes are never returned to HTTP
 // callers — they exist for structured log tagging and Prometheus alerting only.
@@ -51,6 +62,12 @@ var (
 	ErrCacheError    = New(http.StatusInternalServerError, 500003, "cache error")
 	ErrServiceUnavail = New(http.StatusServiceUnavailable, 503001, "service unavailable")
 )
+
+// ErrServiceUnavailable is an alias for ErrServiceUnavail kept for naming
+// symmetry with ErrServiceUnavailable across other places in the codebase
+// (handlers / docs may refer to either name). New code should pick whichever
+// reads better — both point at the same 503/503001 envelope.
+var ErrServiceUnavailable = ErrServiceUnavail
 
 // ── User Module (code segment 410xxx) ───────────────────────────────────────
 var (
@@ -122,6 +139,7 @@ var (
 // HTTP callers — encryption is transparent infrastructure. Codes exist for
 // structured log tagging (Prometheus alert on key misconfiguration).
 var (
-	ErrEncryptPhone = New(http.StatusInternalServerError, 480101, "phone encryption failed")
-	ErrDecryptPhone = New(http.StatusInternalServerError, 480102, "phone decryption failed")
+	ErrEncryptPhone    = New(http.StatusInternalServerError, 480101, "phone encryption failed")
+	ErrDecryptPhone    = New(http.StatusInternalServerError, 480102, "phone decryption failed")
+	ErrPhoneKeyMissing = New(http.StatusInternalServerError, 480103, "phone encryption key not configured")
 )

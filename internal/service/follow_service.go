@@ -57,30 +57,25 @@ import (
 	"cooking-platform/internal/event"
 	"cooking-platform/internal/model/dto"
 	"cooking-platform/internal/repository"
+	"cooking-platform/pkg/config"
 	"cooking-platform/pkg/errcode"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
-// maxFollowing is the per-user follow cap (PRD-Phase2 §8 F-F01 AC-5,
-// "每人最多关注 3,000 人 / 防僵尸关注"). Enforced against the live
-// follows-table count, not the eventually-consistent users.following_count.
-const maxFollowing = 3000
-
-// defaultFollowListSize / maxFollowListSize bound the page size of the
-// follower / following lists. Mirrors the feed module's clamp (PRD-Phase3
-// §5.4: size 1..50, default 20).
-const (
-	defaultFollowListSize = 20
-	maxFollowListSize     = 50
-)
-
 // FollowService is the entry point for all follow-related business operations.
+//
+// maxFollowing / defaultFollowListSize / maxFollowListSize were promoted from
+// package consts to cfg.Follow in Step 18 (FOLLOW-01, Config-First). Stored
+// on the struct so the helper buildFollowListResp / clamp can read them.
 type FollowService struct {
-	followRepo repository.FollowRepository
-	userRepo   repository.UserRepository
-	bus        event.EventPublisher
+	followRepo      repository.FollowRepository
+	userRepo        repository.UserRepository
+	bus             event.EventPublisher
+	maxFollowing    int
+	defaultListSize int
+	maxListSize     int
 }
 
 // NewFollowService wires the service with its dependencies.
@@ -97,11 +92,15 @@ func NewFollowService(
 	followRepo repository.FollowRepository,
 	userRepo repository.UserRepository,
 	bus event.EventPublisher,
+	cfg config.FollowConfig,
 ) *FollowService {
 	return &FollowService{
-		followRepo: followRepo,
-		userRepo:   userRepo,
-		bus:        bus,
+		followRepo:      followRepo,
+		userRepo:        userRepo,
+		bus:             bus,
+		maxFollowing:    cfg.MaxFollowing,
+		defaultListSize: cfg.DefaultListSize,
+		maxListSize:     cfg.MaxListSize,
 	}
 }
 
@@ -149,7 +148,7 @@ func (s *FollowService) Follow(ctx context.Context, followerID, targetID int64) 
 	if err != nil {
 		return nil, fmt.Errorf("follow: count following: %w", err)
 	}
-	if cnt >= maxFollowing {
+	if cnt >= int64(s.maxFollowing) {
 		return nil, errcode.ErrFollowLimitExceeded
 	}
 
@@ -200,7 +199,7 @@ func (s *FollowService) ListFollowers(ctx context.Context, targetID int64, curso
 	if err != nil {
 		return nil, err
 	}
-	size = clampFollowListSize(size)
+	size = s.clampFollowListSize(size)
 
 	// Fetch size+1 to detect has_more without a separate COUNT query —
 	// the same trick the feed module uses.
@@ -218,7 +217,7 @@ func (s *FollowService) ListFollowing(ctx context.Context, targetID int64, curso
 	if err != nil {
 		return nil, err
 	}
-	size = clampFollowListSize(size)
+	size = s.clampFollowListSize(size)
 
 	rows, err := s.followRepo.ListFollowing(ctx, targetID, cursorFollowID, size+1)
 	if err != nil {
@@ -330,14 +329,17 @@ func parseFollowCursor(cursor string) (int64, error) {
 	return id, nil
 }
 
-// clampFollowListSize bounds the requested page size to [1, 50], defaulting
-// to 20 when the caller passes 0 (param absent). Mirrors PRD-Phase3 §5.4.
-func clampFollowListSize(size int) int {
+// clampFollowListSize bounds the requested page size to [1, s.maxListSize],
+// defaulting to s.defaultListSize when the caller passes 0 (param absent).
+// Mirrors PRD-Phase3 §5.4; bounds were promoted from package consts to
+// cfg.Follow in Step 18 (FOLLOW-01) so deployments can tune them without
+// recompiling.
+func (s *FollowService) clampFollowListSize(size int) int {
 	if size <= 0 {
-		return defaultFollowListSize
+		return s.defaultListSize
 	}
-	if size > maxFollowListSize {
-		return maxFollowListSize
+	if size > s.maxListSize {
+		return s.maxListSize
 	}
 	return size
 }

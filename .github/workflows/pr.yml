@@ -43,11 +43,21 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # Pin staticcheck to a known release tag so a breaking change upstream
+      # cannot silently turn green PRs red overnight (Step 18 CI-01).  Bump
+      # this version deliberately, in its own commit, when reviewing the
+      # honnef.co/go/tools release notes.
       - name: Install staticcheck
-        run: go install honnef.co/go/tools/cmd/staticcheck@latest
+        run: go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
 
       - name: staticcheck
         run: staticcheck ./...
+
+      # Step 17 verifier: lints every CI/CD workflow + ensures the
+      # integration-test entry points exist.  Catches "I forgot to update
+      # pr.yml after renaming a step" before review (Step 18 CI-02).
+      - name: verify-step17 (CI/CD self-check)
+        run: make verify-step17
 
       - name: go test (unit + integration)
         env:

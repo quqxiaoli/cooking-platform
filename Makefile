@@ -170,6 +170,11 @@ verify-step16: ## 运行 Step 16 Prometheus + Grafana 监控端到端验证
 verify-step17: ## 运行 Step 17 GitHub Actions CI/CD + PRD v3.0 验证
 	@bash scripts/verify_step17.sh
 
+## check-config-parity: 校验 dev/docker/prod 三份 yaml 顶级 key 集合一致
+.PHONY: check-config-parity
+check-config-parity: ## 校验 configs/{config,config.docker,config.prod}.yaml 顶级 key 一致
+	@bash scripts/check_config_parity.sh
+
 ## migrate-phone: 一次性迁移 phone_encrypted 为 AES-GCM 密文（需设 APP_ENCRYPTION_PHONE_KEY）
 .PHONY: migrate-phone
 migrate-phone:

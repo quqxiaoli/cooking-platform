@@ -47,24 +47,23 @@ import (
 
 	"cooking-platform/internal/model/dto"
 	"cooking-platform/internal/repository"
+	"cooking-platform/pkg/config"
 	"cooking-platform/pkg/errcode"
 
 	"go.uber.org/zap"
 )
 
-// maxKeywordLen is the rune-count cap for a search keyword (PRD AC-7).
-// Counted in runes so CJK input gets a fair 50-character budget.
-const maxKeywordLen = 50
-
-// booleanOperators are the characters MySQL FULLTEXT BOOLEAN MODE treats as
-// operators. They are stripped from user keywords so the term is matched
-// literally. See file header for the rationale.
-const booleanOperators = `+-><()~*"@`
-
 // SearchService is the business orchestrator for the search module.
+//
+// maxKeywordLen / booleanOperators were promoted from package consts to
+// cfg.Search in Step 18 (SEARCH-01, Config-First). Stored on the struct so
+// helper functions stay pure (rune counting / Map filtering close over the
+// config value via method receivers).
 type SearchService struct {
-	searchRepo repository.SearchRepository
-	assembler  *AuthorAssembler
+	searchRepo       repository.SearchRepository
+	assembler        *AuthorAssembler
+	maxKeywordLen    int
+	booleanOperators string
 }
 
 // NewSearchService wires the service with its dependencies.
@@ -75,10 +74,13 @@ type SearchService struct {
 func NewSearchService(
 	searchRepo repository.SearchRepository,
 	assembler *AuthorAssembler,
+	cfg config.SearchConfig,
 ) *SearchService {
 	return &SearchService{
-		searchRepo: searchRepo,
-		assembler:  assembler,
+		searchRepo:       searchRepo,
+		assembler:        assembler,
+		maxKeywordLen:    cfg.MaxKeywordLen,
+		booleanOperators: cfg.BooleanOperators,
 	}
 }
 
@@ -92,7 +94,7 @@ func NewSearchService(
 //  5. Assemble author snapshots and the next cursor.
 func (s *SearchService) Search(ctx context.Context, q dto.SearchQuery) (*dto.SearchResp, error) {
 	// 1. Keyword normalisation & validation.
-	keyword := normaliseKeyword(q.Keyword)
+	keyword := s.normaliseKeyword(q.Keyword)
 	if keyword == "" {
 		// AC-2: empty / whitespace-only — do not execute the search.
 		return nil, errcode.ErrSearchKeywordEmpty
@@ -101,7 +103,7 @@ func (s *SearchService) Search(ctx context.Context, q dto.SearchQuery) (*dto.Sea
 	// 2. BOOLEAN MODE sanitisation. If stripping operators leaves nothing
 	//    (e.g. the user typed only "+++"), treat it as an empty keyword —
 	//    there is no literal term left to match.
-	safe := sanitiseBoolean(keyword)
+	safe := s.sanitiseBoolean(keyword)
 	if safe == "" {
 		return nil, errcode.ErrSearchKeywordEmpty
 	}
@@ -151,13 +153,13 @@ func (s *SearchService) Search(ctx context.Context, q dto.SearchQuery) (*dto.Sea
 // ── Private helpers ─────────────────────────────────────────────────────────
 
 // normaliseKeyword trims surrounding whitespace and clamps the keyword to
-// maxKeywordLen RUNES (AC-7 — truncate, do not reject). Rune-based slicing
+// s.maxKeywordLen RUNES (AC-7 — truncate, do not reject). Rune-based slicing
 // avoids cutting a multi-byte CJK character in half.
-func normaliseKeyword(raw string) string {
+func (s *SearchService) normaliseKeyword(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	runes := []rune(trimmed)
-	if len(runes) > maxKeywordLen {
-		runes = runes[:maxKeywordLen]
+	if len(runes) > s.maxKeywordLen {
+		runes = runes[:s.maxKeywordLen]
 	}
 	return string(runes)
 }
@@ -167,9 +169,9 @@ func normaliseKeyword(raw string) string {
 // "  red   pork " becomes "red pork" (two terms, both required by AGAINST's
 // default behaviour without operators). See file header for why we strip
 // rather than support boolean syntax.
-func sanitiseBoolean(keyword string) string {
+func (s *SearchService) sanitiseBoolean(keyword string) string {
 	cleaned := strings.Map(func(r rune) rune {
-		if strings.ContainsRune(booleanOperators, r) {
+		if strings.ContainsRune(s.booleanOperators, r) {
 			return -1 // drop the operator character
 		}
 		return r

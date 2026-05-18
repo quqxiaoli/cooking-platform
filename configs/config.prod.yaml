@@ -8,6 +8,7 @@ server:
   read_timeout: 10s
   write_timeout: 10s
   idle_timeout: 60s
+  shutdown_timeout: 30s
 
 database:
   dsn: "<DB_USER>:<DB_PASSWORD>@tcp(mysql-master:3306)/cooking_platform?charset=utf8mb4&parseTime=True&loc=Local&timeout=5s"
@@ -75,6 +76,8 @@ audit:
   access_key_secret: "<AUDIT_ACCESS_KEY_SECRET>"
   region: cn-shanghai
   mock_result: ""     # ignored when provider=aliyun
+  timeout: 3s         # [Step 18] per-call timeout to Aliyun Green
+  max_retries: 2      # [Step 18] retry budget for transient upstream errors
 
 # [Step 9] Production uses real Aliyun OSS.
 # access_key_id and access_key_secret come from env:
@@ -108,3 +111,52 @@ ratelimit:
   sms_phone_window: 60s
   sms_per_phone_per_day: 5
   sms_per_ip_per_day: 10
+
+# [Step 13] Consumer batch/flush tuning.
+# Prod values match dev for now; tune after observing throughput.
+consumer:
+  like:
+    batch_size: 50
+    flush_interval: 3s
+  pv:
+    batch_size: 100
+    flush_interval: 5s
+  count:
+    batch_size: 20
+    flush_interval: 10s
+
+# [Step 13] Cache TTLs.
+# dedup_ttl (Step 18) guards pv/count consumer against duplicate event delivery
+# under at-least-once RabbitMQ semantics — see internal/consumer.
+cache:
+  like_state_ttl: 168h        # 7 days
+  feed_cache_ttl: 5m
+  pv_dedup_ttl: 1h
+  dedup_ttl: 24h
+  user_sms_daily_ttl: 24h
+
+# [Step 16] Prometheus metrics exposition.
+# Production scraping is by Prometheus container — keep enabled=true.
+metrics:
+  enabled: true
+  namespace: cooking
+
+# [Step 18] Search keyword tunables.
+search:
+  max_keyword_len: 50
+  boolean_operators: '+-><()~*"@'
+
+# [Step 18] Follow limits — keep MVP defaults; tune after observing.
+follow:
+  max_following: 3000
+  default_list_size: 20
+  max_list_size: 50
+
+# [Step 18] CORS — prod MUST use explicit origin allow-list; "*" forbidden
+# (config.Validate refuses release mode + "*" combination, CORS-01).
+cors:
+  allowed_origins:
+    - "https://cooking.example.com"   # replace with real public domain at go-live
+  allowed_methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+  allowed_headers: ["Origin", "Content-Type", "Authorization", "X-Request-ID"]
+  expose_headers: ["X-Request-ID"]

@@ -9,6 +9,7 @@ server:
   read_timeout: 10s
   write_timeout: 10s
   idle_timeout: 60s
+  shutdown_timeout: 30s
 
 database:
   # Docker service name: mysql (master, port 3306 internal)
@@ -64,6 +65,8 @@ audit:
   provider: mock
   mock_result: pass
   region: cn-shanghai
+  timeout: 3s
+  max_retries: 2
 
 oss:
   provider: mock
@@ -76,8 +79,9 @@ oss:
   mock_listen_addr: "127.0.0.1:18080"
 
 encryption:
-  phone_key: ""
-  phone_pepper: ""
+  # DEV ONLY — Docker dev stack shares the same committed test key as config.yaml.
+  phone_key: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+  phone_pepper: "dev-pepper-change-in-prod"
 
 ratelimit:
   sms_phone_window: 60s
@@ -99,8 +103,25 @@ cache:
   like_state_ttl: 168h
   feed_cache_ttl: 5m
   pv_dedup_ttl: 1h
+  dedup_ttl: 24h
+  user_sms_daily_ttl: 24h
 
 # [Step 16] Prometheus — identical to dev; namespace always "cooking".
 metrics:
   enabled: true
   namespace: cooking
+
+search:
+  max_keyword_len: 50
+  boolean_operators: '+-><()~*"@'
+
+follow:
+  max_following: 3000
+  default_list_size: 20
+  max_list_size: 50
+
+cors:
+  allowed_origins: ["*"]
+  allowed_methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+  allowed_headers: ["Origin", "Content-Type", "Authorization", "X-Request-ID"]
+  expose_headers: ["X-Request-ID"]

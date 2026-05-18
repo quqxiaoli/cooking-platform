@@ -6,10 +6,32 @@ import "context"
 //
 // 参数 payload 是 Event.Payload 的原始 JSON 字节，Consumer 自行 json.Unmarshal。
 // 返回 nil 表示消费成功（对应 RabbitMQ 的 ACK）。
-// 返回 error 表示消费失败（对应 RabbitMQ 的 Nack + 重试/死信）。
+// 返回 error 表示消费失败（对应 RabbitMQ 的 Nack + 死信）。
 //
-// Channel 实现下消费失败只打 warn 日志，不重试（进程内消息，幂等压力小）。
-// RabbitMQ 实现下消费失败触发 Nack，由 MQ 决定是否重新投递。
+// ── 失败语义对照表（Step 18 A7 / DELIVERY-01） ─────────────────────────────
+//
+// 这张表是 Channel 与 RabbitMQ 两种 Bus 实现行为差异的唯一权威。Consumer
+// 编写 Handler 时**必须**按此契约决定何时返回 error、何时返回 nil。
+//
+//	          | Channel 实现                  | RabbitMQ 实现
+//	──────────┼───────────────────────────────┼──────────────────────────────
+//	Handler   | 仅 zap.Warn 记录失败，消息丢弃 | Nack(requeue=false) → DLX
+//	返回 err  | 不重试，channel 内消息不重投   | "cooking.events.dlx.queue"
+//	──────────┼───────────────────────────────┼──────────────────────────────
+//	Handler   | Ack（隐式：channel 读完即丢）  | Ack(false) → broker 删除消息
+//	返回 nil  |                               |
+//	──────────┼───────────────────────────────┼──────────────────────────────
+//	进程崩溃  | 队列内消息全部丢失             | 未 Ack 的消息会被重投
+//	(handler |                               | (at-least-once)
+//	 跑完之前)|                               |
+//	──────────┼───────────────────────────────┼──────────────────────────────
+//	业务编写  | 不要依赖 "返回 error 会重试" — Channel 不重试；
+//	约束     | 同时也不要依赖 "处理过的事件不会再来" — RabbitMQ 至少一次。
+//	         | 所有 Handler 必须幂等（INSERT IGNORE / GREATEST / dedup 缓存）。
+//
+// 已知偏离（按规则保留）：unmarshal 失败时两边都只 Warn 然后 return nil，
+// 不让一条永远解析不出来的毒消息卡死 DLX —— 这是 PRD v3.0 §10 已签注的
+// 例外，写在 channel.go / rabbitmq.go handleDelivery 注释里。
 type Handler func(ctx context.Context, payload []byte) error
 
 // EventPublisher 发布事件的接口。

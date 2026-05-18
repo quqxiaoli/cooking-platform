@@ -28,14 +28,18 @@ type Config struct {
 	Consumer   ConsumerConfig   `mapstructure:"consumer"`   // [Step 13] per-consumer batch/flush tuning
 	Cache      CacheConfig      `mapstructure:"cache"`      // [Step 13] Redis TTL knobs
 	Metrics    MetricsConfig    `mapstructure:"metrics"`    // [Step 16] Prometheus metrics
+	Search     SearchConfig     `mapstructure:"search"`     // [Step 18] keyword length + boolean operators (was const)
+	Follow     FollowConfig     `mapstructure:"follow"`     // [Step 18] follow limits + list sizes (was const)
+	CORS       CORSConfig       `mapstructure:"cors"`       // [Step 18] CORS allow lists (was hardcoded "*")
 }
 
 type ServerConfig struct {
-	Port         int           `mapstructure:"port"`
-	Mode         string        `mapstructure:"mode"`          // debug | release | test
-	ReadTimeout  time.Duration `mapstructure:"read_timeout"`  // default 10s
-	WriteTimeout time.Duration `mapstructure:"write_timeout"` // default 10s
-	IdleTimeout  time.Duration `mapstructure:"idle_timeout"`  // default 60s
+	Port            int           `mapstructure:"port"`
+	Mode            string        `mapstructure:"mode"`             // debug | release | test
+	ReadTimeout     time.Duration `mapstructure:"read_timeout"`     // default 10s
+	WriteTimeout    time.Duration `mapstructure:"write_timeout"`    // default 10s
+	IdleTimeout     time.Duration `mapstructure:"idle_timeout"`     // default 60s
+	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"` // default 30s — overall LIFO shutdown budget (Step 18)
 }
 
 type DatabaseConfig struct {
@@ -132,11 +136,13 @@ type OSSConfig struct {
 // AccessKeyID / AccessKeySecret: production reads from
 // APP_AUDIT_ACCESS_KEY_ID / APP_AUDIT_ACCESS_KEY_SECRET env vars.
 type AuditConfig struct {
-	Provider        string `mapstructure:"provider"`          // mock | aliyun
-	AccessKeyID     string `mapstructure:"access_key_id"`     // env-injected in prod
-	AccessKeySecret string `mapstructure:"access_key_secret"` // env-injected in prod
-	Region          string `mapstructure:"region"`            // default: cn-shanghai
-	MockResult      string `mapstructure:"mock_result"`       // dev only: pass | suspect | reject
+	Provider        string        `mapstructure:"provider"`          // mock | aliyun
+	AccessKeyID     string        `mapstructure:"access_key_id"`     // env-injected in prod
+	AccessKeySecret string        `mapstructure:"access_key_secret"` // env-injected in prod
+	Region          string        `mapstructure:"region"`            // default: cn-shanghai
+	MockResult      string        `mapstructure:"mock_result"`       // dev only: pass | suspect | reject
+	Timeout         time.Duration `mapstructure:"timeout"`           // [Step 18] per-call timeout for upstream auditor SDK (AUDIT-01); fields-only today, callers wire in later step
+	MaxRetries      int           `mapstructure:"max_retries"`       // [Step 18] retry budget for transient upstream errors
 }
 
 // EncryptionConfig holds field-level encryption parameters (added in Step 11).
@@ -185,9 +191,40 @@ type CountConsumerConfig struct {
 // CacheConfig holds Redis TTLs for the cache layer (added in Step 13).
 // Values were previously hardcoded constants in cache/*.go.
 type CacheConfig struct {
-	LikeStateTTL time.Duration `mapstructure:"like_state_ttl"` // like:set:* and like:cnt:* keys
-	FeedCacheTTL time.Duration `mapstructure:"feed_cache_ttl"` // per-page feed payload cache
-	PVDedupTTL   time.Duration `mapstructure:"pv_dedup_ttl"`   // pv:dup:* dedup window
+	LikeStateTTL     time.Duration `mapstructure:"like_state_ttl"`      // like:set:* and like:cnt:* keys
+	FeedCacheTTL     time.Duration `mapstructure:"feed_cache_ttl"`      // per-page feed payload cache
+	PVDedupTTL       time.Duration `mapstructure:"pv_dedup_ttl"`        // pv:dup:* dedup window
+	DedupTTL         time.Duration `mapstructure:"dedup_ttl"`           // [Step 18] dedup:{topic}:{event_id} SETNX window
+	UserSMSDailyTTL  time.Duration `mapstructure:"user_sms_daily_ttl"`  // [Step 18] sms:limit:* + sms:ip:* daily counter TTL (USER-03 was 24h const)
+}
+
+// SearchConfig holds keyword-sanitisation tunables (Step 18; previously
+// package-level consts in internal/service/search_service.go — SEARCH-01).
+//
+// MaxKeywordLen is a rune count, not byte count, so CJK input gets fair
+// budget. BooleanOperators is the literal set of chars stripped before
+// running MySQL FULLTEXT BOOLEAN MODE — see search_service.go file header.
+type SearchConfig struct {
+	MaxKeywordLen    int    `mapstructure:"max_keyword_len"`
+	BooleanOperators string `mapstructure:"boolean_operators"`
+}
+
+// FollowConfig holds follow-module limits (Step 18; previously
+// package-level consts in internal/service/follow_service.go — FOLLOW-01).
+type FollowConfig struct {
+	MaxFollowing    int `mapstructure:"max_following"`     // per-user follow cap (PRD §8 F-F01 AC-5)
+	DefaultListSize int `mapstructure:"default_list_size"` // page size when client omits
+	MaxListSize     int `mapstructure:"max_list_size"`     // hard cap on size param
+}
+
+// CORSConfig holds the allow-lists used by middleware/cors.go (Step 18;
+// previously hardcoded "*" — CORS-01). prod MUST set AllowedOrigins to an
+// explicit list; "*" combined with cookies is a CSRF accelerant.
+type CORSConfig struct {
+	AllowedOrigins []string `mapstructure:"allowed_origins"`
+	AllowedMethods []string `mapstructure:"allowed_methods"`
+	AllowedHeaders []string `mapstructure:"allowed_headers"`
+	ExposeHeaders  []string `mapstructure:"expose_headers"`
 }
 
 // MetricsConfig controls Prometheus metric exposition (added in Step 16).
@@ -263,6 +300,7 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("server.read_timeout", "10s")
 	v.SetDefault("server.write_timeout", "10s")
 	v.SetDefault("server.idle_timeout", "60s")
+	v.SetDefault("server.shutdown_timeout", "30s") // [Step 18] LIFO shutdown total budget
 
 	v.SetDefault("database.max_open_conns", 25)
 	v.SetDefault("database.max_idle_conns", 10)
@@ -328,6 +366,21 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("cache.like_state_ttl", "168h") // 7 days
 	v.SetDefault("cache.feed_cache_ttl", "5m")
 	v.SetDefault("cache.pv_dedup_ttl", "1h")
+	v.SetDefault("cache.dedup_ttl", "24h")            // [Step 18] event-id SETNX dedup
+	v.SetDefault("cache.user_sms_daily_ttl", "24h")   // [Step 18] USER-03 const → cfg
+
+	// [Step 18] Search / Follow / CORS / Audit defaults — Config-First补丁.
+	v.SetDefault("search.max_keyword_len", 50)
+	v.SetDefault("search.boolean_operators", `+-><()~*"@`)
+	v.SetDefault("follow.max_following", 3000)
+	v.SetDefault("follow.default_list_size", 20)
+	v.SetDefault("follow.max_list_size", 50)
+	v.SetDefault("cors.allowed_origins", []string{"*"}) // dev permissive; prod overrides
+	v.SetDefault("cors.allowed_methods", []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"})
+	v.SetDefault("cors.allowed_headers", []string{"Origin", "Content-Type", "Authorization", "X-Request-ID"})
+	v.SetDefault("cors.expose_headers", []string{"X-Request-ID"})
+	v.SetDefault("audit.timeout", "3s")
+	v.SetDefault("audit.max_retries", 2)
 
 	// [Step 16] Metrics defaults.
 	v.SetDefault("metrics.enabled", true)
@@ -337,6 +390,9 @@ func registerDefaults(v *viper.Viper) {
 func validate(cfg *Config) error {
 	if cfg.Server.Port <= 0 || cfg.Server.Port > 65535 {
 		return fmt.Errorf("server.port out of range: %d", cfg.Server.Port)
+	}
+	if cfg.Server.ShutdownTimeout <= 0 {
+		return fmt.Errorf("server.shutdown_timeout must be positive")
 	}
 	if cfg.Database.DSN == "" {
 		return fmt.Errorf("database.dsn is required")
@@ -481,8 +537,61 @@ func validate(cfg *Config) error {
 	if cfg.Cache.PVDedupTTL <= 0 {
 		return fmt.Errorf("cache.pv_dedup_ttl must be positive")
 	}
+	if cfg.Cache.DedupTTL <= 0 {
+		return fmt.Errorf("cache.dedup_ttl must be positive")
+	}
+	if cfg.Cache.UserSMSDailyTTL <= 0 {
+		return fmt.Errorf("cache.user_sms_daily_ttl must be positive")
+	}
+
+	// [Step 18] Search / Follow / CORS validation.
+	if cfg.Search.MaxKeywordLen <= 0 {
+		return fmt.Errorf("search.max_keyword_len must be positive")
+	}
+	if cfg.Search.BooleanOperators == "" {
+		return fmt.Errorf("search.boolean_operators must be non-empty")
+	}
+	if cfg.Follow.MaxFollowing <= 0 {
+		return fmt.Errorf("follow.max_following must be positive")
+	}
+	if cfg.Follow.DefaultListSize <= 0 || cfg.Follow.DefaultListSize > cfg.Follow.MaxListSize {
+		return fmt.Errorf("follow.default_list_size must be in (0, max_list_size]")
+	}
+	if cfg.Follow.MaxListSize <= 0 {
+		return fmt.Errorf("follow.max_list_size must be positive")
+	}
+	if len(cfg.CORS.AllowedOrigins) == 0 {
+		return fmt.Errorf("cors.allowed_origins must be non-empty (use [\"*\"] for dev permissive)")
+	}
+	if cfg.Server.Mode == "release" {
+		for _, origin := range cfg.CORS.AllowedOrigins {
+			if origin == "*" {
+				return fmt.Errorf("cors.allowed_origins must not contain \"*\" in release mode (CSRF risk)")
+			}
+		}
+	}
+	if cfg.Audit.Timeout <= 0 {
+		return fmt.Errorf("audit.timeout must be positive")
+	}
+	if cfg.Audit.MaxRetries < 0 {
+		return fmt.Errorf("audit.max_retries must be >= 0")
+	}
+
+	// [Step 16] Metrics validation — namespace must be non-empty when enabled
+	// so Prometheus scraping never sees nameless metrics (would collide with
+	// other services on the same Prometheus instance).
+	if cfg.Metrics.Enabled && cfg.Metrics.Namespace == "" {
+		return fmt.Errorf("metrics.namespace must be non-empty when metrics.enabled=true")
+	}
 
 	// [Step 11] Encryption validation.
+	// [Step 18] GUARD-18: release mode MUST have a non-empty phone_key; this
+	// pairs with pkg/crypto.ErrEmptyKey fail-closed semantics so that a
+	// misconfigured prod deployment crashes at boot instead of silently
+	// writing plaintext phones to users.phone_encrypted.
+	if cfg.Server.Mode == "release" && cfg.Encryption.PhoneKey == "" {
+		return fmt.Errorf("encryption.phone_key must be set in release mode (inject APP_ENCRYPTION_PHONE_KEY)")
+	}
 	if key := cfg.Encryption.PhoneKey; key != "" {
 		if len(key) != 64 {
 			return fmt.Errorf("encryption.phone_key must be 64 hex characters (32 bytes), got %d chars", len(key))

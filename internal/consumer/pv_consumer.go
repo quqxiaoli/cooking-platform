@@ -47,6 +47,7 @@ import (
 	"sync"
 	"time"
 
+	"cooking-platform/internal/cache"
 	"cooking-platform/internal/event"
 	"cooking-platform/pkg/config"
 	"cooking-platform/pkg/metrics"
@@ -56,19 +57,27 @@ import (
 )
 
 // PVConsumer subscribes to TopicPV and batches view increments.
+//
+// dedup guards against at-least-once redelivery from RabbitMQ — UPDATE
+// view_count + ? is non-idempotent, so a duplicated event would double-count
+// without it. Channel-mode bus never redelivers, but we keep the same guard
+// active there for parity with prod (and so tests observe the same path).
 type PVConsumer struct {
 	bus           event.EventSubscriber
 	db            *gorm.DB
+	dedup         *cache.EventDedupCache
 	batchSize     int
 	flushInterval time.Duration
 }
 
 // NewPVConsumer constructs a PVConsumer.
 // cfg provides batch/flush knobs previously hardcoded as package-level constants.
-func NewPVConsumer(bus event.EventSubscriber, db *gorm.DB, cfg config.PVConsumerConfig) *PVConsumer {
+// dedup is the consumer-side event-id dedup cache (Step 18 IDEMP-01).
+func NewPVConsumer(bus event.EventSubscriber, db *gorm.DB, dedup *cache.EventDedupCache, cfg config.PVConsumerConfig) *PVConsumer {
 	return &PVConsumer{
 		bus:           bus,
 		db:            db,
+		dedup:         dedup,
 		batchSize:     cfg.BatchSize,
 		flushInterval: cfg.FlushInterval,
 	}
@@ -87,10 +96,26 @@ func (c *PVConsumer) Start(ctx context.Context) error {
 	subWg.Add(1)
 	go func() {
 		defer subWg.Done()
-		_ = c.bus.Subscribe(ctx, event.TopicPV, func(_ context.Context, payload []byte) error {
+		_ = c.bus.Subscribe(ctx, event.TopicPV, func(hctx context.Context, payload []byte) error {
 			var p event.PVEvent
 			if err := json.Unmarshal(payload, &p); err != nil {
 				zap.L().Warn("pv consumer: unmarshal PVEvent", zap.Error(err))
+				return nil
+			}
+			// Event-id dedup BEFORE the channel — duplicates never reach the
+			// flush loop, so they cannot inflate view_count.
+			seen, derr := c.dedup.SeenOrMark(hctx, event.TopicPV, p.EventID)
+			if derr != nil {
+				zap.L().Warn("pv consumer: dedup check failed (fail-open)",
+					zap.String("event_id", p.EventID),
+					zap.Error(derr),
+				)
+				// fall through — fail-open is better than silent loss
+			} else if seen {
+				zap.L().Debug("pv consumer: duplicate event dropped",
+					zap.String("event_id", p.EventID),
+					zap.Int64("post_id", p.PostID),
+				)
 				return nil
 			}
 			select {
