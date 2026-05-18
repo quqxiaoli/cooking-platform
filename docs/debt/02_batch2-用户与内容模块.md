@@ -38,6 +38,8 @@
 
 ### TD-USER-03 · IncrementAndCheckSMSPhoneDaily / IncrementAndCheckSMSIPDaily 内部 TTL 硬编码 `24*time.Hour`
 
+> **状态：✅ 已修复（Step 18 pre-cleanup A5）→ 详见 [10_status-step18-pre-cleanup.md](10_status-step18-pre-cleanup.md)**
+
 - **档位**：1（违反 B2：无包级常量 / Config-First）
 - **代码锚点**：`internal/cache/user_cache.go:IncrementAndCheckSMSPhoneDaily:114`（`return c.incrAndCheck(..., 24*time.Hour)`）/ `IncrementAndCheckSMSIPDaily:121`（同）
 - **现状**：daily 限流的 TTL（24h）由 cache 层硬编码。`pkg/config/config.go` 的 `RatelimitConfig` 已有 `SMSPerPhonePerDay/SMSPerIPPerDay`，但 daily-window 长度本身没有进 config —— 想压测改 12h 窗口需改代码。

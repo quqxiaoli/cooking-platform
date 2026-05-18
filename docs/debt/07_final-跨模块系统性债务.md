@@ -34,6 +34,8 @@
 
 ### TD-SYS-02 · 错误码段位 + HTTP status 双重一致性破洞
 
+> **状态：✅ 已修复（Step 18 pre-cleanup A2）→ 详见 [10_status-step18-pre-cleanup.md](10_status-step18-pre-cleanup.md)**
+
 - **档位**：1（B1 段位规则 + §九 评分卡）
 - **代码锚点**：
   - `pkg/errcode/errcode.go` 文件头注释"X=4 客户端 / X=5 服务端"与 470xxx（审核）/ 480xxx（手机号加密）矛盾（TD-ERRCODE-01）
@@ -69,6 +71,8 @@
 
 ### TD-SYS-04 · `main.go` 30s shutdown timeout 硬编码，且 ctx 未覆盖 ConsumerManager / OSS / Bus / Redis / MySQL
 
+> **状态：✅ 已修复（Step 18 pre-cleanup A3）→ 详见 [10_status-step18-pre-cleanup.md](10_status-step18-pre-cleanup.md)**
+
 - **档位**：1（违反 Config-First B4 + 优雅停机不完整）
 - **代码锚点**：
   - `cmd/server/main.go:273` `shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)`
@@ -103,6 +107,8 @@
 
 ### TD-SYS-06 · 三个 observability admin 面零鉴权（/metrics / Grafana / RabbitMQ Mgmt）
 
+> **状态：✅ 已修复（Step 18 pre-cleanup B1 + B3）→ /metrics 公网 404；Grafana 走 SSH tunnel 127.0.0.1:3000；RabbitMQ Mgmt prod 不 publish。详见 [10_status-step18-pre-cleanup.md](10_status-step18-pre-cleanup.md)**
+
 - **档位**：2（架构所限：dev 网络隔离当鉴权）
 - **代码锚点**：
   - `cmd/server/main.go` Prometheus `/metrics` 直接挂主路由（TD-METRICS-02）
@@ -119,6 +125,8 @@
 ---
 
 ### TD-SYS-07 · prod / dev / docker 三套 yaml 字段对齐无 CI 校验
+
+> **状态：✅ 已修复（Step 18 pre-cleanup A1）→ 详见 [10_status-step18-pre-cleanup.md](10_status-step18-pre-cleanup.md)**
 
 - **档位**：1（违反 Config-First B4 的衍生：配置漂移）
 - **代码锚点**：
@@ -137,6 +145,8 @@
 
 ### TD-SYS-08 · `/health` `/readiness` 等监控端点的 response envelope 与业务接口不一致
 
+> **状态：✅ 已修复（Step 18 pre-cleanup A2）→ 详见 [10_status-step18-pre-cleanup.md](10_status-step18-pre-cleanup.md)**
+
 - **档位**：1（违反 A5 handler 模板：bind → validate → service → response 四步）
 - **代码锚点**：
   - `internal/handler/health.go:38` Health 用 `response.Success`（OK）
@@ -152,6 +162,8 @@
 ---
 
 ### TD-SYS-09 · 13 个 `verify_step*.sh` 未接 CI，本地通过不等于 CI 通过
+
+> **状态：✅ 部分修复（Step 18 pre-cleanup C2）→ verify-step17 已接入 pr.yml；其余 verify_step3..16 / golangci-lint 仍未做，留待 Step 18 之后立项。详见 [10_status-step18-pre-cleanup.md](10_status-step18-pre-cleanup.md)**
 
 - **档位**：4（MVP 妥协）
 - **代码锚点**：

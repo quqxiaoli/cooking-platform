@@ -14,6 +14,8 @@
 
 ### TD-FOLLOW-01 · `maxFollowing / defaultFollowListSize / maxFollowListSize` 三个包级 const 违反 Config-First
 
+> **状态：✅ 已修复（Step 18 pre-cleanup A5）→ 详见 [10_status-step18-pre-cleanup.md](10_status-step18-pre-cleanup.md)**
+
 - **档位**：1
 - **代码锚点**：`internal/service/follow_service.go:69`（`const maxFollowing = 3000`）、`internal/service/follow_service.go:74-77`（`defaultFollowListSize = 20` / `maxFollowListSize = 50`）
 - **现状**：3000 关注上限、列表默认 20、列表上限 50，全部以包级 `const` 落地。其中 3000 是产品策略层硬约束（PRD-Phase2 §8 F-F01 AC-5「防僵尸关注」），未来若运营需要调整门槛（例如对认证创作者开 1w），必须改代码 + 重新构建镜像。

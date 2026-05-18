@@ -20,6 +20,8 @@
 
 ### TD-INFRA-01 · 缺 `docker-compose.prod.yml`，prod 编排没有可执行文件
 
+> **状态：✅ 已修复（Step 18 pre-cleanup B1）→ 详见 [10_status-step18-pre-cleanup.md](10_status-step18-pre-cleanup.md)**
+
 - **档位**：4
 - **代码锚点**：
   - `configs/config.prod.yaml:3`：注释明确写 `Loaded when CONFIG_PATH=configs/config.prod.yaml (set in docker-compose.prod.yml).`
@@ -35,6 +37,8 @@
 ---
 
 ### TD-INFRA-02 · 部署口令全部硬编码，dev 与 prod 没有 `.env` / `env_file` 通道
+
+> **状态：✅ 已修复（Step 18 pre-cleanup B1）→ 详见 [10_status-step18-pre-cleanup.md](10_status-step18-pre-cleanup.md)**
 
 - **档位**：4
 - **代码锚点**：
@@ -70,6 +74,8 @@
 
 ### TD-INFRA-04 · `init-slave.sh` 每次容器重建都 mysqldump，且无幂等保护
 
+> **状态：✅ 已修复（Step 18 pre-cleanup C3）→ 详见 [10_status-step18-pre-cleanup.md](10_status-step18-pre-cleanup.md)**
+
 - **档位**：4
 - **代码锚点**：`deploy/mysql/init-slave.sh`、`docker-compose.yml:77-97` slave-init 服务
 - **现状**：slave-init 是 `restart: "no"` 的一次性容器，但若 `docker compose down && docker compose up` 时 volume 还在，slave 已经在 replicating，init 容器又会再跑一遍 `CHANGE REPLICATION SOURCE TO + mysqldump`。靠 Docker "只在 exit 0 后跳过" 兜底。
@@ -97,6 +103,8 @@
 ---
 
 ### TD-INFRA-06 · Nginx 入口零防护：无速率限制、无 connection cap、无超大 body 限制
+
+> **状态：✅ 已修复（Step 18 pre-cleanup B2）→ 详见 [10_status-step18-pre-cleanup.md](10_status-step18-pre-cleanup.md)**
 
 - **档位**：4
 - **代码锚点**：`deploy/nginx/nginx.conf`（全文 60 行，无 `limit_req_zone` / `limit_conn_zone` / `client_max_body_size`）
@@ -126,6 +134,8 @@
 
 ### TD-INFRA-08 · `health.go` 503 响应绕过 `response` 包，且 `503001` 越段 / 不在 errcode 表
 
+> **状态：✅ 已修复（Step 18 pre-cleanup A2）→ 详见 [10_status-step18-pre-cleanup.md](10_status-step18-pre-cleanup.md)**
+
 - **档位**：1
 - **代码锚点**：
   - `internal/handler/health.go:79-84` 手写 `c.JSON(503, gin.H{"code": 503001, ...})`
@@ -141,6 +151,8 @@
 ---
 
 ### TD-INFRA-09 · `config.prod.yaml` 缺 `consumer` / `cache` / `metrics` 三段（Config-First 一致性破洞）
+
+> **状态：✅ 已修复（Step 18 pre-cleanup A1）→ 详见 [10_status-step18-pre-cleanup.md](10_status-step18-pre-cleanup.md)**
 
 - **档位**：1
 - **代码锚点**：
@@ -175,6 +187,8 @@
 
 ### TD-METRICS-02 · `/metrics` 公开在应用 8080 端口，无 token / IP 白名单 / 独立端口
 
+> **状态：✅ 已修复（Step 18 pre-cleanup B3）→ Nginx 公网入口 `location = /metrics { return 404; }` 屏蔽；Prometheus 仍走内网 scrape app1/app2。详见 [10_status-step18-pre-cleanup.md](10_status-step18-pre-cleanup.md)**
+
 - **档位**：2
 - **代码锚点**：
   - `cmd/server/main.go` 把 `/metrics` 挂在主 router 上（推断；当前未读但 verify_step16 默认走 8080）
@@ -191,6 +205,8 @@
 ---
 
 ### TD-METRICS-03 · Grafana 默认凭据 `admin/admin` 写死在 compose
+
+> **状态：✅ 已修复（Step 18 pre-cleanup B1）→ prod compose 用 `${APP_GRAFANA_ADMIN_PASSWORD:?Required}` 强制走 `.env.prod`，dev 仍保留 admin/admin（已 GUARD 接受）。详见 [10_status-step18-pre-cleanup.md](10_status-step18-pre-cleanup.md)**
 
 - **档位**：4
 - **代码锚点**：`docker-compose.yml:252` `GF_SECURITY_ADMIN_PASSWORD: admin`
@@ -223,6 +239,8 @@
 
 ### TD-CI-01 · `pr.yml` 用 `staticcheck@latest`，无版本锁
 
+> **状态：✅ 已修复（Step 18 pre-cleanup C1）→ 详见 [10_status-step18-pre-cleanup.md](10_status-step18-pre-cleanup.md)**
+
 - **档位**：4
 - **代码锚点**：`.github/workflows/pr.yml:47` `go install honnef.co/go/tools/cmd/staticcheck@latest`
 - **现状**：每次 CI 拉最新 staticcheck，未来某次 PR 会因为上游新增检查项突然变红，原作者却没动代码——侦错时浪费 30 分钟。
@@ -236,6 +254,8 @@
 ---
 
 ### TD-CI-02 · CI 未接 `verify_step*.sh`，无覆盖率门禁、无 golangci-lint
+
+> **状态：✅ 部分修复（Step 18 pre-cleanup C2）→ verify-step17 已接入 pr.yml；覆盖率门禁 + golangci-lint 仍未做，留待 Step 18 之后立项。详见 [10_status-step18-pre-cleanup.md](10_status-step18-pre-cleanup.md)**
 
 - **档位**：4
 - **代码锚点**：`.github/workflows/pr.yml`（仅 `go vet` + `staticcheck` + `go test -race`）

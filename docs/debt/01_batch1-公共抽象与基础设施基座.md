@@ -53,6 +53,8 @@
 
 ### TD-EVT-04 · Handler 错误处理不统一：Channel 仅 Warn，RabbitMQ 直入 DLX
 
+> **状态：✅ 已修复（Step 18 pre-cleanup A7）→ 详见 [10_status-step18-pre-cleanup.md](10_status-step18-pre-cleanup.md)**
+
 - **档位**：1
 - **代码锚点**：`internal/event/channel.go:Subscribe:103-107`（handler err 只打 Warn 继续消费）vs. `internal/event/rabbitmq.go:handleDelivery:395-399`（handler err → Nack false → DLX，无 retry）
 - **现状**：同一 handler 在 dev（Channel）与 prod（RabbitMQ）的失败语义完全不同。dev 上 handler 永远"消费成功"，prod 上首次失败立即 DLX。

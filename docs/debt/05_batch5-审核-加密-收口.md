@@ -31,6 +31,8 @@
 
 ### TD-AUDIT-01 · `AuditConfig` 缺超时配置，Aliyun Green RPC 无 ctx 截止时间
 
+> **状态：🟡 部分修复（Step 18 pre-cleanup A5）→ 字段 + cfg.Validate + 三 yaml 段已加，`pkg/audit/aliyun.go` 调用方仍未接入；详见 [10_status-step18-pre-cleanup.md §3](10_status-step18-pre-cleanup.md)**
+
 - **档位**：1
 - **代码锚点**：`pkg/config/config.go:134-140`（`AuditConfig` 结构体仅含 Provider / AK / Region / MockResult，无 Timeout）+ `pkg/audit/aliyun.go:49-55`（`green.NewClientWithAccessKey` 创建 client 时未注入超时）+ `pkg/audit/aliyun.go:59`（`Review` 接收 `ctx` 但 alibaba SDK 不消费 ctx）
 - **现状**：AuditConsumer 是单 goroutine 串行处理：`Review` 调用阻塞约 200-800 ms（正常）或可挂数十秒（Aliyun 默认 SDK 超时）。`AuditConfig` 没有任何 timeout / retry 字段。生产若 Aliyun 端慢响应 / 网络抖动，整条审核管道被首个慢请求阻塞，后续 PostEvent 在 Channel/RabbitMQ 队列里堆积。
@@ -87,6 +89,8 @@
 
 ### TD-CRYPTO-01 · `EncryptPhone(plain, keyHex="")` 静默回落为明文落库，prod 配置漏 key 即破合规
 
+> **状态：✅ 已修复（Step 18 pre-cleanup A4）→ 详见 [10_status-step18-pre-cleanup.md](10_status-step18-pre-cleanup.md)**
+
 - **档位**：1
 - **代码锚点**：`pkg/crypto/phone.go:23-27`（`if keyHex == "" { return plaintext, nil }`）+ `internal/service/user_service.go:175-186`（首次登录自动注册路径直接信任 EncryptPhone 返回值，把它写入 `user.PhoneEncrypted`）
 - **现状**：EncryptPhone 设计成"key 为空 → 返回明文"，文件头注释自陈"This allows dev environments to run without configuring a key while keeping the code path identical to production"。但**生产环境忘配 `APP_ENCRYPTION_PHONE_KEY` 完全没有任何报错**——服务正常启动、用户正常注册、users.phone_encrypted 表里全是明文手机号。合规事故的最经典反面教材。`config.validate` 没有"生产模式必须配 PhoneKey"的硬断言。
@@ -142,6 +146,8 @@
 ---
 
 ### TD-CORS-01 · `Access-Control-Allow-Origin: *` 硬编码，注释承诺"prod 收紧"但无 cfg 字段
+
+> **状态：✅ 已修复（Step 18 pre-cleanup A5）→ 详见 [10_status-step18-pre-cleanup.md](10_status-step18-pre-cleanup.md)**
 
 - **档位**：1
 - **代码锚点**：`internal/middleware/cors.go:10-23`（`c.Header("Access-Control-Allow-Origin", "*")` 硬编码 + 注释"Tighten AllowOrigins in production via config before go-live"）

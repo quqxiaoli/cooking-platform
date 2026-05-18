@@ -150,6 +150,8 @@
 
 ### TD-SEARCH-01 · `maxKeywordLen=50` / `booleanOperators` 包级常量，违反 Config-First (B2)
 
+> **状态：✅ 已修复（Step 18 pre-cleanup A5）→ 详见 [10_status-step18-pre-cleanup.md](10_status-step18-pre-cleanup.md)**
+
 - **档位**：1（违反 §七 强制规则 1 Config-First；体检 M2 已修 Consumer/Cache 但**漏修 Search**）
 - **代码锚点**：`internal/service/search_service.go:maxKeywordLen:57` / `booleanOperators:62`
 - **现状**：搜索关键词长度上限、BOOLEAN MODE 运算符黑名单两个调参参数硬编码为包级 const。PM 想在商业化阶段对中英文做差异化（中文 30 字 / 英文 80 字）→ 必须改代码 + 重新构建镜像。
