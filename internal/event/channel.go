@@ -73,6 +73,10 @@ func (b *ChannelBus) Publish(ctx context.Context, evt Event) error {
 //
 // 同一 topic 可多次调用 Subscribe 注册不同 Handler，每条消息广播给所有 Handler。
 // Handler 返回 error 时只打 warn 日志，不影响其他消息的处理（Channel 模式下不重试）。
+//
+// 与 RabbitMQBus.Subscribe 的行为差异详见 bus.go: Handler 类型注释中的
+// "失败语义对照表" —— 业务代码绝对不能依赖具体实现的差异，
+// 必须按对照表写幂等的 Handler。
 func (b *ChannelBus) Subscribe(ctx context.Context, topic string, handler Handler) error {
 	ch := make(chan []byte, b.bufSize)
 

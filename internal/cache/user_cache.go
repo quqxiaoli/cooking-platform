@@ -24,13 +24,18 @@ import (
 
 // UserCache wraps a Redis client with user-module-specific operations.
 type UserCache struct {
-	rdb *redis.Client
+	rdb         *redis.Client
+	smsDailyTTL time.Duration // [Step 18] cfg.Cache.UserSMSDailyTTL — was 24h const
 }
 
 // NewUserCache constructs a UserCache. The provided Redis client is shared
 // with other cache modules — UserCache does not own it and must not Close() it.
-func NewUserCache(rdb *redis.Client) *UserCache {
-	return &UserCache{rdb: rdb}
+//
+// smsDailyTTL is the TTL anchored on first INCR for the per-phone and per-IP
+// daily SMS counters (sms:limit:* / sms:ip:* keys). Step 18 lifted the
+// previously hardcoded 24h to cfg.Cache.UserSMSDailyTTL (USER-03).
+func NewUserCache(rdb *redis.Client, smsDailyTTL time.Duration) *UserCache {
+	return &UserCache{rdb: rdb, smsDailyTTL: smsDailyTTL}
 }
 
 // ── Key builders ────────────────────────────────────────────────────────────
@@ -111,14 +116,14 @@ func (c *UserCache) CheckAndConsumeSMSWindow(ctx context.Context, phoneHash stri
 //   - allowed=true if the count after increment is ≤ limit
 //   - allowed=false otherwise (caller must reject the request)
 func (c *UserCache) IncrementAndCheckSMSPhoneDaily(ctx context.Context, phoneHash string, limit int) (allowed bool, err error) {
-	return c.incrAndCheck(ctx, keySMSDailyPhone(phoneHash), limit, 24*time.Hour)
+	return c.incrAndCheck(ctx, keySMSDailyPhone(phoneHash), limit, c.smsDailyTTL)
 }
 
 // IncrementAndCheckSMSIPDaily is the IP-side equivalent. ipHash should be a
 // SHA-256 hex digest of the client IP; the service layer is responsible for
 // hashing (we don't want raw IPs flowing through cache method signatures).
 func (c *UserCache) IncrementAndCheckSMSIPDaily(ctx context.Context, ipHash string, limit int) (allowed bool, err error) {
-	return c.incrAndCheck(ctx, keySMSDailyIP(ipHash), limit, 24*time.Hour)
+	return c.incrAndCheck(ctx, keySMSDailyIP(ipHash), limit, c.smsDailyTTL)
 }
 
 // incrAndCheck is the shared INCR-then-EXPIRE-on-first-hit primitive.

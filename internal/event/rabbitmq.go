@@ -384,6 +384,11 @@ func (b *RabbitMQBus) subscribeOnce(ctx context.Context, topic string, handler H
 
 // handleDelivery unmarshals a single AMQP delivery and invokes the handler.
 // ACKs on success; Nacks without requeue (→ DLX) on unmarshal or handler error.
+//
+// See bus.go: Handler "失败语义对照表" for the side-by-side contract with
+// ChannelBus. The two implementations diverge on what happens after Handler
+// error: Channel just logs and drops; RabbitMQ Nacks to DLX. Business
+// Handlers must be idempotent so neither divergence breaks correctness.
 func (b *RabbitMQBus) handleDelivery(ctx context.Context, topic string, d amqp.Delivery, handler Handler) {
 	var evt Event
 	if err := json.Unmarshal(d.Body, &evt); err != nil {

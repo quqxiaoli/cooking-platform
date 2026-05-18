@@ -69,14 +69,33 @@ func (m *ConsumerManager) StartAll() {
 //  1. cancel ctx → 通知所有 Consumer 的 Subscribe/Start 停止接收新消息
 //  2. wg.Wait()  → 等待每个 Consumer 处理完当前消息后退出
 //
+// ctx 提供超时控制：若 ctx 在所有 Consumer 退出前到期，返回 ctx.Err()
+// 但 cancel 仍已下发，Consumer 会继续在后台收尾（不会立即 Kill）。
+// 调用方据此决定 "warn 后继续下一阶段" 还是 "fatal exit"。
+//
 // main.go 在 Shutdown 返回后再调用 bus.Close()，保证时序正确。
-func (m *ConsumerManager) Shutdown() {
+func (m *ConsumerManager) Shutdown(ctx context.Context) error {
 	if m.cancel == nil {
 		// StartAll 从未被调用，直接返回
-		return
+		return nil
 	}
 	zap.L().Info("consumer manager shutting down...")
 	m.cancel()
-	m.wg.Wait()
-	zap.L().Info("consumer manager stopped")
+
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		zap.L().Info("consumer manager stopped")
+		return nil
+	case <-ctx.Done():
+		zap.L().Warn("consumer manager shutdown deadline exceeded",
+			zap.Error(ctx.Err()),
+		)
+		return ctx.Err()
+	}
 }

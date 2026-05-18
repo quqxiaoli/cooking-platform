@@ -3,6 +3,7 @@ package crypto
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -40,25 +41,20 @@ func TestEncryptProducesDistinctCiphertexts(t *testing.T) {
 	}
 }
 
-func TestEncryptEmptyKeyReturnsPlaintext(t *testing.T) {
-	phone := "13900000000"
-	got, err := EncryptPhone(phone, "")
-	if err != nil {
-		t.Fatalf("EncryptPhone(key=\"\"): %v", err)
-	}
-	if got != phone {
-		t.Fatalf("dev mode: got %q want plaintext %q", got, phone)
+func TestEncryptEmptyKeyFailsClosed(t *testing.T) {
+	// Step 18 contract change (TD-CRYPTO-01): empty keyHex no longer falls
+	// back to plaintext — it returns ErrEmptyKey so a misconfigured release
+	// boot refuses to write plaintext phones to users.phone_encrypted.
+	_, err := EncryptPhone("13900000000", "")
+	if !errors.Is(err, ErrEmptyKey) {
+		t.Fatalf("EncryptPhone(key=\"\"): want ErrEmptyKey, got %v", err)
 	}
 }
 
-func TestDecryptEmptyKeyReturnsInputUnchanged(t *testing.T) {
-	phone := "13900000000"
-	got, err := DecryptPhone(phone, "")
-	if err != nil {
-		t.Fatalf("DecryptPhone(key=\"\"): %v", err)
-	}
-	if got != phone {
-		t.Fatalf("dev mode: got %q want %q", got, phone)
+func TestDecryptEmptyKeyFailsClosed(t *testing.T) {
+	_, err := DecryptPhone("13900000000", "")
+	if !errors.Is(err, ErrEmptyKey) {
+		t.Fatalf("DecryptPhone(key=\"\"): want ErrEmptyKey, got %v", err)
 	}
 }
 

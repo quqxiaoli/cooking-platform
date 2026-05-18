@@ -18,8 +18,13 @@
 //  9. gin.SetMode + setupRouter
 //  10. HTTP server start
 //  11. Wait for SIGINT/SIGTERM
-//  12. Graceful shutdown (LIFO):
-//     HTTP Server → ConsumerManager → OSS Client → EventBus → Redis → MySQL
+//  12. Graceful shutdown (LIFO, 3 phases — Step 18):
+//     Phase 1 (≤5s)   HTTP Server
+//     Phase 2 (≤15s)  ConsumerManager → EventBus
+//     Phase 3 (≤5s)   OSS Client → Redis → MySQL
+//     Overall budget cfg.Server.ShutdownTimeout (default 30s) is the hard cap
+//     enforced by the parent context; per-phase deadlines bound the worst-case
+//     wait so a hung downstream cannot starve the next phase.
 //
 // Step 9 added stage 7.9 because the upload module needs an oss.Client that
 // MockClient backs with an embedded HTTP listener — its lifecycle (start in
@@ -140,7 +145,7 @@ func main() {
 	// ── 7. [Step 3] User module wiring ────────────────────────────────────────
 	// Step 9 change: NewUserService now also takes cfg.OSS so UpdateProfile
 	// can enforce the OSS whitelist on avatar_url updates.
-	userCache := cache.NewUserCache(rdb)
+	userCache := cache.NewUserCache(rdb, cfg.Cache.UserSMSDailyTTL)
 	userRepo := repository.NewUserRepository(db)
 	jwtMgr := jwtpkg.NewManager(cfg.JWT)
 
@@ -185,21 +190,27 @@ func main() {
 	}
 	log.Info("auditor initialized", zap.String("provider", cfg.Audit.Provider))
 
+	// [Step 18 IDEMP-01] Shared event-id dedup for non-idempotent consumers
+	// (PV / Count). LikeConsumer's idempotency is already guarded by Lua at
+	// the cache layer; AuditConsumer writes are upserts. Single instance so
+	// every consumer hits the same Redis namespace.
+	eventDedup := cache.NewEventDedupCache(rdb, cfg.Cache.DedupTTL)
+
 	consumerMgr.Register(consumer.NewLikeConsumer(bus, likeRepo, cfg.Consumer.Like))
-	consumerMgr.Register(consumer.NewPVConsumer(bus, db, cfg.Consumer.PV))
-	consumerMgr.Register(consumer.NewCountConsumer(bus, db, cfg.Consumer.Count))
+	consumerMgr.Register(consumer.NewPVConsumer(bus, db, eventDedup, cfg.Consumer.PV))
+	consumerMgr.Register(consumer.NewCountConsumer(bus, db, eventDedup, cfg.Consumer.Count))
 	consumerMgr.Register(consumer.NewAuditConsumer(bus, postRepo, auditRepo, auditor, feedCache))
 	consumerMgr.StartAll()
 
 	// ── 7.7 [Step 7] Search module wiring ─────────────────────────────────────
 	searchRepo := repository.NewSearchRepository(db)
-	searchSvc := service.NewSearchService(searchRepo, authorAssembler)
+	searchSvc := service.NewSearchService(searchRepo, authorAssembler, cfg.Search)
 	searchHandler := handler.NewSearchHandler(searchSvc)
 	log.Info("search module wired")
 
 	// ── 7.8 [Step 8] Follow module wiring ─────────────────────────────────────
 	followRepo := repository.NewFollowRepository(db)
-	followSvc := service.NewFollowService(followRepo, userRepo, bus)
+	followSvc := service.NewFollowService(followRepo, userRepo, bus, cfg.Follow)
 	followHandler := handler.NewFollowHandler(followSvc)
 	log.Info("follow module wired")
 
@@ -235,7 +246,7 @@ func main() {
 	// HealthHandler is created here so setupRouter does not need *gorm.DB.
 	healthHandler := handler.NewHealthHandler(db, rdb)
 	gin.SetMode(cfg.Server.Mode)
-	engine := setupRouter(rdb, userSvc, healthHandler, userHandler, postHandler, feedHandler, likeHandler, searchHandler, followHandler, uploadHandler, cfg.Metrics.Enabled)
+	engine := setupRouter(rdb, userSvc, healthHandler, userHandler, postHandler, feedHandler, likeHandler, searchHandler, followHandler, uploadHandler, cfg.Metrics.Enabled, cfg.CORS)
 
 	// ── 10. HTTP server ───────────────────────────────────────────────────────
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
@@ -261,55 +272,80 @@ func main() {
 
 	log.Info("shutdown signal received")
 
-	// ── 12. Graceful shutdown (LIFO order) ────────────────────────────────────
-	// HTTP Server → ConsumerManager → OSS Client → EventBus → Redis → MySQL.
-	//
-	// HTTP first so no new events are published while consumers drain.
-	// Consumers next so all in-flight events finish persisting.
-	// OSS Client then so MockClient's embedded HTTP listener stops accepting
-	// uploads (no behavioural effect on AliyunClient — Close is a no-op there).
-	// EventBus then closes so any latent Publish call returns error
-	// instead of blocking. Finally the infrastructure connections.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	// ── 12. Graceful shutdown (LIFO, 3 phases) ────────────────────────────────
+	// Each phase has its own deadline (5s / 15s / 5s) so a hung downstream
+	// cannot starve the next phase. cfg.Server.ShutdownTimeout is the parent
+	// budget — phase deadlines never exceed it; remaining slack absorbs
+	// goroutine wake-up jitter.
+	parentCtx, parentCancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
+	defer parentCancel()
 
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Error("http server shutdown", zap.Error(err))
+	// Phase 1: HTTP (≤5s) — refuse new requests, drain in-flight handlers.
+	phase1Ctx, phase1Cancel := context.WithTimeout(parentCtx, 5*time.Second)
+	if err := srv.Shutdown(phase1Ctx); err != nil {
+		log.Warn("phase1 http server shutdown",
+			zap.Error(err),
+			zap.Duration("phase_budget", 5*time.Second),
+		)
 	} else {
-		log.Info("http server stopped")
+		log.Info("phase1 http server stopped")
 	}
+	phase1Cancel()
 
-	log.Info("consumer manager shutting down...")
-	consumerMgr.Shutdown()
-	log.Info("consumer manager stopped")
-
-	if err := ossClient.Close(); err != nil {
-		log.Error("oss client close", zap.Error(err))
+	// Phase 2: Consumer + EventBus (≤15s) — drain in-flight events, then
+	// close the bus so subscribers wake from blocking deliveries.
+	phase2Ctx, phase2Cancel := context.WithTimeout(parentCtx, 15*time.Second)
+	if err := consumerMgr.Shutdown(phase2Ctx); err != nil {
+		log.Warn("phase2 consumer manager shutdown",
+			zap.Error(err),
+			zap.Duration("phase_budget", 15*time.Second),
+		)
+	}
+	if err := closeWithDeadline(phase2Ctx, "event bus", bus.Close); err != nil {
+		log.Warn("phase2 event bus close", zap.Error(err))
 	} else {
-		log.Info("oss client closed")
+		log.Info("phase2 event bus closed")
 	}
+	phase2Cancel()
 
-	if err := bus.Close(); err != nil {
-		log.Error("event bus close", zap.Error(err))
+	// Phase 3: OSS + Redis + MySQL (≤5s) — infra teardown.
+	phase3Ctx, phase3Cancel := context.WithTimeout(parentCtx, 5*time.Second)
+	if err := closeWithDeadline(phase3Ctx, "oss client", ossClient.Close); err != nil {
+		log.Warn("phase3 oss client close", zap.Error(err))
 	} else {
-		log.Info("event bus closed")
+		log.Info("phase3 oss client closed")
 	}
-
-	if err := rdb.Close(); err != nil {
-		log.Error("redis close", zap.Error(err))
+	if err := closeWithDeadline(phase3Ctx, "redis", rdb.Close); err != nil {
+		log.Warn("phase3 redis close", zap.Error(err))
 	} else {
-		log.Info("redis close ok")
+		log.Info("phase3 redis closed")
 	}
-
 	if sqlDB, err := db.DB(); err == nil {
-		if err := sqlDB.Close(); err != nil {
-			log.Error("mysql close", zap.Error(err))
+		if err := closeWithDeadline(phase3Ctx, "mysql", sqlDB.Close); err != nil {
+			log.Warn("phase3 mysql close", zap.Error(err))
 		} else {
-			log.Info("mysql close ok")
+			log.Info("phase3 mysql closed")
 		}
 	}
+	phase3Cancel()
 
 	log.Info("server exited cleanly")
+}
+
+// closeWithDeadline 调用 close()（不带 ctx 的 Close 函数）并以 ctx 的截止时间
+// 作为软超时。close 在 goroutine 中执行；ctx 超时则立即返回 ctx.Err()，
+// 但 close 仍在后台跑（避免在已损坏的连接上 hang 住整个进程）。
+func closeWithDeadline(ctx context.Context, name string, close func() error) error {
+	done := make(chan error, 1)
+	go func() {
+		done <- close()
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("%s close deadline exceeded: %w", name, ctx.Err())
+	}
 }
 
 // setupRouter wires HTTP routes for all modules.
@@ -334,6 +370,7 @@ func setupRouter(
 	followHandler *handler.FollowHandler,
 	uploadHandler *handler.UploadHandler,
 	metricsEnabled bool,
+	corsCfg config.CORSConfig,
 ) *gin.Engine {
 	r := gin.New()
 
@@ -345,7 +382,7 @@ func setupRouter(
 	r.Use(middleware.RequestID())
 	r.Use(middleware.Security())
 	r.Use(middleware.Logger())
-	r.Use(middleware.CORS())
+	r.Use(middleware.CORS(corsCfg))
 	if metricsEnabled {
 		r.Use(middleware.Metrics())
 	}

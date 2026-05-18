@@ -34,6 +34,43 @@ SLAVE_ROOT_PASSWORD="${SLAVE_ROOT_PASSWORD:-cooking123}"
 
 DUMP_FILE="/tmp/master_snapshot.sql"
 
+# ── Idempotency guard (Step 18 MYSQL-01) ─────────────────────────────────────
+# This container's `restart: "no"` policy means it normally runs once and
+# exits, but `docker compose up -d` will re-run it whenever the container is
+# recreated (image upgrade, compose-file edit, etc.).  Without this guard,
+# every re-run does:
+#   mysqldump master → RESET MASTER on slave → restore dump → START REPLICA
+# which discards the slave's accumulated GTID position and burns several
+# seconds of pointless dump/restore.  On a busy prod slave the truncate
+# window can briefly serve stale reads.
+#
+# Probe SHOW REPLICA STATUS: if BOTH IO and SQL threads are Running=Yes the
+# slave is already configured and we exit 0 immediately.  Any other state —
+# fresh slave, broken replication, partial setup — falls through and runs
+# the full rebuild flow below.
+#
+# We swallow mysql's exit code in the probe because a fresh slave answers
+# "Empty set", which mysql exits non-zero on with -e; the empty grep result
+# is the signal we want.
+echo "[init-slave] Probing existing replication state on ${SLAVE_HOST}..."
+existing_status=$(
+  mysql -h "${SLAVE_HOST}" -u root -p"${SLAVE_ROOT_PASSWORD}" \
+    -e "SHOW REPLICA STATUS\G" 2>/dev/null \
+    | grep -E "Replica_(IO|SQL)_Running:" \
+    || true
+)
+io_running=$(printf '%s\n' "${existing_status}" | grep -c "Replica_IO_Running: Yes"  || true)
+sql_running=$(printf '%s\n' "${existing_status}" | grep -c "Replica_SQL_Running: Yes" || true)
+if [ "${io_running}" = "1" ] && [ "${sql_running}" = "1" ]; then
+  echo "[init-slave] Replication already running (IO=Yes, SQL=Yes) — skipping rebuild."
+  echo "[init-slave] Current status:"
+  mysql -h "${SLAVE_HOST}" -u root -p"${SLAVE_ROOT_PASSWORD}" \
+    -e "SHOW REPLICA STATUS\G" 2>/dev/null \
+    | grep -E "Replica_(IO|SQL)_Running|Last_IO_Error|Last_SQL_Error|Seconds_Behind"
+  exit 0
+fi
+echo "[init-slave] Replication not running (IO=${io_running}, SQL=${sql_running}) — proceeding with rebuild."
+
 echo "[init-slave] Step 1/4: dumping master ${MASTER_HOST}:${MASTER_PORT}..."
 mysqldump \
   -h "${MASTER_HOST}" \

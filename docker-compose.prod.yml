@@ -1,0 +1,308 @@
+# docker-compose.prod.yml — Production environment compose.
+#
+# Differences from docker-compose.yml (dev):
+#
+#  - app1 / app2 use configs/config.prod.yaml (loaded via CONFIG_PATH env).
+#  - All secrets come from `.env.prod` (see `.env.prod.example`).
+#    docker compose substitutes ${VAR} → real value at parse time.
+#  - mysql / mysql-slave / redis / rabbitmq / prometheus / grafana
+#    do NOT publish ports to the host.  Only nginx (80 / 443) is exposed
+#    to the public interface.  Admin UIs (Grafana, Prometheus, RabbitMQ
+#    management, MySQL) are reachable only from the Docker internal
+#    network — operators SSH-tunnel into the box and curl them via the
+#    `cooking-prod-net` bridge.  This is the "admin 三面鉴权" boundary
+#    (Step 18 ADMIN-01).
+#  - restart: always (not unless-stopped) — Docker daemon restart should
+#    bring the whole stack back up unconditionally.
+#  - Volumes are named with the -prod suffix so a dev compose run on the
+#    same host cannot accidentally touch prod data.
+#
+# Usage:
+#   cp .env.prod.example .env.prod
+#   # edit .env.prod and inject real secrets
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+#
+# .env.prod is in .gitignore — it must never be committed.
+
+services:
+
+  # ── MySQL 8.0 master ──────────────────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: cooking-mysql-prod
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-cooking_platform}
+    # No host port published — app1/app2 reach it via the cooking-prod-net
+    # bridge using DNS name "mysql".  External access only via docker exec.
+    volumes:
+      - mysql-prod-data:/var/lib/mysql
+      - ./deploy/mysql/dev.cnf:/etc/mysql/conf.d/dev.cnf:ro
+      - ./deploy/mysql/init-master.sql:/docker-entrypoint-initdb.d/01-init-master.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - cooking-prod-net
+
+  # ── MySQL 8.0 slave ───────────────────────────────────────────────────────
+  mysql-slave:
+    image: mysql:8.0
+    container_name: cooking-mysql-slave-prod
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-cooking_platform}
+      MYSQL_ROOT_HOST: "%"
+    volumes:
+      - mysql-slave-prod-data:/var/lib/mysql
+      - ./deploy/mysql/slave.cnf:/etc/mysql/conf.d/slave.cnf:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - cooking-prod-net
+
+  # ── MySQL replication initialiser (one-shot) ──────────────────────────────
+  mysql-slave-init:
+    image: mysql:8.0
+    container_name: cooking-mysql-slave-init-prod
+    restart: "no"
+    environment:
+      MASTER_HOST: mysql
+      MASTER_PORT: "3306"
+      SLAVE_HOST: mysql-slave
+      REPL_USER: ${REPL_USER:?REPL_USER is required}
+      REPL_PASSWORD: ${REPL_PASSWORD:?REPL_PASSWORD is required}
+      SLAVE_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    volumes:
+      - ./deploy/mysql/init-slave.sh:/init-slave.sh:ro
+    entrypoint: ["/bin/bash", "/init-slave.sh"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+      mysql-slave:
+        condition: service_healthy
+    networks:
+      - cooking-prod-net
+
+  # ── Redis 7.2 ─────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: cooking-redis-prod
+    restart: always
+    # Production REQUIRES a password — startup fails fast if REDIS_PASSWORD
+    # is empty (config.prod.yaml then mismatches the broker → app aborts).
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required}", "--save", "60", "1000", "--appendonly", "yes"]
+    volumes:
+      - redis-prod-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      - cooking-prod-net
+
+  # ── RabbitMQ 3.x ──────────────────────────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: cooking-rabbitmq-prod
+    restart: always
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?RABBITMQ_USER is required}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required}
+      RABBITMQ_DEFAULT_VHOST: /
+    # No host ports published — neither AMQP (5672) nor management UI (15672)
+    # are reachable from outside the Docker network.  Apps connect to
+    # amqp://...@rabbitmq:5672/ via config.prod.yaml; operators use SSH
+    # tunnel or `docker exec` for management.
+    volumes:
+      - rabbitmq-prod-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - cooking-prod-net
+
+  # ── Go application instances ──────────────────────────────────────────────
+  app1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cooking-app1-prod
+    restart: always
+    environment:
+      CONFIG_PATH: configs/config.prod.yaml
+      # All APP_* env vars below are consumed by Viper's AutomaticEnv()
+      # (see pkg/config/config.go) — they override the matching yaml keys.
+      APP_ENCRYPTION_PHONE_KEY: ${APP_ENCRYPTION_PHONE_KEY:?APP_ENCRYPTION_PHONE_KEY is required}
+      APP_ENCRYPTION_PHONE_PEPPER: ${APP_ENCRYPTION_PHONE_PEPPER:?APP_ENCRYPTION_PHONE_PEPPER is required}
+      APP_JWT_SECRET: ${APP_JWT_SECRET:?APP_JWT_SECRET is required (min 32 chars)}
+      APP_DATABASE_DSN: ${APP_DATABASE_DSN:?APP_DATABASE_DSN is required}
+      APP_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      APP_MQ_URL: ${APP_MQ_URL:?APP_MQ_URL is required}
+      APP_OSS_ACCESS_KEY_ID: ${APP_OSS_ACCESS_KEY_ID:?APP_OSS_ACCESS_KEY_ID is required}
+      APP_OSS_ACCESS_KEY_SECRET: ${APP_OSS_ACCESS_KEY_SECRET:?APP_OSS_ACCESS_KEY_SECRET is required}
+      APP_SMS_ACCESS_KEY_ID: ${APP_SMS_ACCESS_KEY_ID:?APP_SMS_ACCESS_KEY_ID is required}
+      APP_SMS_ACCESS_KEY_SECRET: ${APP_SMS_ACCESS_KEY_SECRET:?APP_SMS_ACCESS_KEY_SECRET is required}
+      APP_AUDIT_ACCESS_KEY_ID: ${APP_AUDIT_ACCESS_KEY_ID:?APP_AUDIT_ACCESS_KEY_ID is required}
+      APP_AUDIT_ACCESS_KEY_SECRET: ${APP_AUDIT_ACCESS_KEY_SECRET:?APP_AUDIT_ACCESS_KEY_SECRET is required}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      mysql-slave:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - cooking-prod-net
+
+  app2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cooking-app2-prod
+    restart: always
+    environment:
+      CONFIG_PATH: configs/config.prod.yaml
+      APP_ENCRYPTION_PHONE_KEY: ${APP_ENCRYPTION_PHONE_KEY}
+      APP_ENCRYPTION_PHONE_PEPPER: ${APP_ENCRYPTION_PHONE_PEPPER}
+      APP_JWT_SECRET: ${APP_JWT_SECRET}
+      APP_DATABASE_DSN: ${APP_DATABASE_DSN}
+      APP_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      APP_MQ_URL: ${APP_MQ_URL}
+      APP_OSS_ACCESS_KEY_ID: ${APP_OSS_ACCESS_KEY_ID}
+      APP_OSS_ACCESS_KEY_SECRET: ${APP_OSS_ACCESS_KEY_SECRET}
+      APP_SMS_ACCESS_KEY_ID: ${APP_SMS_ACCESS_KEY_ID}
+      APP_SMS_ACCESS_KEY_SECRET: ${APP_SMS_ACCESS_KEY_SECRET}
+      APP_AUDIT_ACCESS_KEY_ID: ${APP_AUDIT_ACCESS_KEY_ID}
+      APP_AUDIT_ACCESS_KEY_SECRET: ${APP_AUDIT_ACCESS_KEY_SECRET}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      mysql-slave:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - cooking-prod-net
+
+  # ── Nginx reverse proxy ───────────────────────────────────────────────────
+  # The only container with public ports.  Adds rate limiting + body size
+  # caps via deploy/nginx/nginx.conf (B2).
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: cooking-nginx-prod
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"   # TLS termination — mount certs into deploy/nginx/certs/
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      app1:
+        condition: service_healthy
+      app2:
+        condition: service_healthy
+    networks:
+      - cooking-prod-net
+
+  # ── Prometheus ────────────────────────────────────────────────────────────
+  # No host port published — Prometheus is reachable only from inside the
+  # Docker network (i.e. Grafana via DNS "prometheus:9090").  Operators SSH
+  # into the host and use `curl --resolve` or temporary port-forward when
+  # debugging.  /metrics endpoints on app1/app2 are likewise not exposed
+  # through Nginx (no `location /metrics` block in nginx.conf).
+  prometheus:
+    image: prom/prometheus:v3.4.0
+    container_name: cooking-prometheus-prod
+    restart: always
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-prod-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"   # prod: 30-day retention
+      - "--web.enable-lifecycle"
+    depends_on:
+      app1:
+        condition: service_healthy
+      app2:
+        condition: service_healthy
+    networks:
+      - cooking-prod-net
+
+  # ── Grafana ───────────────────────────────────────────────────────────────
+  # Bound to 127.0.0.1 only — reachable from the host (SSH tunnel target)
+  # but never from the public interface.  Admin password is mandatory in
+  # prod; startup fails if APP_GRAFANA_ADMIN_PASSWORD is unset.
+  grafana:
+    image: grafana/grafana:12.0.1
+    container_name: cooking-grafana-prod
+    restart: always
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${APP_GRAFANA_ADMIN_PASSWORD:?APP_GRAFANA_ADMIN_PASSWORD is required}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Disable anonymous access; force login.
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-prod-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - cooking-prod-net
+
+volumes:
+  mysql-prod-data:
+    driver: local
+  mysql-slave-prod-data:
+    driver: local
+  redis-prod-data:
+    driver: local
+  rabbitmq-prod-data:
+    driver: local
+  prometheus-prod-data:
+    driver: local
+  grafana-prod-data:
+    driver: local
+
+networks:
+  cooking-prod-net:
+    driver: bridge

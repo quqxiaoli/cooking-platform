@@ -178,6 +178,9 @@ func (s *UserService) Login(ctx context.Context, phone, code string) (*dto.Login
 				zap.String("phone_hash", phoneHash),
 				zap.Error(encErr),
 			)
+			if errors.Is(encErr, crypto.ErrEmptyKey) {
+				return nil, errcode.ErrPhoneKeyMissing
+			}
 			return nil, errcode.ErrEncryptPhone
 		}
 		now := time.Now()

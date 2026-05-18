@@ -75,6 +75,7 @@ import (
 	"sync"
 	"time"
 
+	"cooking-platform/internal/cache"
 	"cooking-platform/internal/event"
 	"cooking-platform/pkg/config"
 	"cooking-platform/pkg/metrics"
@@ -100,19 +101,27 @@ type countDelta struct {
 }
 
 // CountConsumer subscribes to five topics and maintains users counters.
+//
+// dedup guards against at-least-once redelivery. Each subscribe handler
+// checks the event id BEFORE pushing a countDelta onto eventCh, so a
+// duplicate cannot inflate post_count / total_likes / follower_count /
+// following_count — those columns use unconditional `+ ?` updates.
 type CountConsumer struct {
 	bus           event.EventSubscriber
 	db            *gorm.DB
+	dedup         *cache.EventDedupCache
 	batchSize     int
 	flushInterval time.Duration
 }
 
 // NewCountConsumer constructs a CountConsumer.
 // cfg provides batch/flush knobs previously hardcoded as package-level constants.
-func NewCountConsumer(bus event.EventSubscriber, db *gorm.DB, cfg config.CountConsumerConfig) *CountConsumer {
+// dedup is the consumer-side event-id dedup cache (Step 18 IDEMP-01).
+func NewCountConsumer(bus event.EventSubscriber, db *gorm.DB, dedup *cache.EventDedupCache, cfg config.CountConsumerConfig) *CountConsumer {
 	return &CountConsumer{
 		bus:           bus,
 		db:            db,
+		dedup:         dedup,
 		batchSize:     cfg.BatchSize,
 		flushInterval: cfg.FlushInterval,
 	}
@@ -133,10 +142,13 @@ func (c *CountConsumer) Start(ctx context.Context) error {
 	// ── TopicPost → users.post_count +1 ─────────────────────────────────────
 	go func() {
 		defer subWg.Done()
-		_ = c.bus.Subscribe(ctx, event.TopicPost, func(_ context.Context, payload []byte) error {
+		_ = c.bus.Subscribe(ctx, event.TopicPost, func(hctx context.Context, payload []byte) error {
 			var p event.PostEvent
 			if err := json.Unmarshal(payload, &p); err != nil {
 				zap.L().Warn("count consumer: unmarshal PostEvent", zap.Error(err))
+				return nil
+			}
+			if c.dedupSeen(hctx, event.TopicPost, p.EventID) {
 				return nil
 			}
 			c.send(ctx, eventCh, countDelta{userID: p.AuthorID, postCount: 1}, event.TopicPost)
@@ -147,10 +159,13 @@ func (c *CountConsumer) Start(ctx context.Context) error {
 	// ── TopicLike → users.total_likes +1 (for AuthorID, the post owner) ────
 	go func() {
 		defer subWg.Done()
-		_ = c.bus.Subscribe(ctx, event.TopicLike, func(_ context.Context, payload []byte) error {
+		_ = c.bus.Subscribe(ctx, event.TopicLike, func(hctx context.Context, payload []byte) error {
 			var p event.LikeEvent
 			if err := json.Unmarshal(payload, &p); err != nil {
 				zap.L().Warn("count consumer: unmarshal LikeEvent", zap.Error(err))
+				return nil
+			}
+			if c.dedupSeen(hctx, event.TopicLike, p.EventID) {
 				return nil
 			}
 			c.send(ctx, eventCh, countDelta{userID: p.AuthorID, totalLikes: 1}, event.TopicLike)
@@ -161,10 +176,13 @@ func (c *CountConsumer) Start(ctx context.Context) error {
 	// ── TopicUnlike → users.total_likes -1 ─────────────────────────────────
 	go func() {
 		defer subWg.Done()
-		_ = c.bus.Subscribe(ctx, event.TopicUnlike, func(_ context.Context, payload []byte) error {
+		_ = c.bus.Subscribe(ctx, event.TopicUnlike, func(hctx context.Context, payload []byte) error {
 			var p event.UnlikeEvent
 			if err := json.Unmarshal(payload, &p); err != nil {
 				zap.L().Warn("count consumer: unmarshal UnlikeEvent", zap.Error(err))
+				return nil
+			}
+			if c.dedupSeen(hctx, event.TopicUnlike, p.EventID) {
 				return nil
 			}
 			c.send(ctx, eventCh, countDelta{userID: p.AuthorID, totalLikes: -1}, event.TopicUnlike)
@@ -176,10 +194,13 @@ func (c *CountConsumer) Start(ctx context.Context) error {
 	// One follow edge mutates two users, so this handler emits two deltas.
 	go func() {
 		defer subWg.Done()
-		_ = c.bus.Subscribe(ctx, event.TopicFollow, func(_ context.Context, payload []byte) error {
+		_ = c.bus.Subscribe(ctx, event.TopicFollow, func(hctx context.Context, payload []byte) error {
 			var p event.FollowEvent
 			if err := json.Unmarshal(payload, &p); err != nil {
 				zap.L().Warn("count consumer: unmarshal FollowEvent", zap.Error(err))
+				return nil
+			}
+			if c.dedupSeen(hctx, event.TopicFollow, p.EventID) {
 				return nil
 			}
 			c.send(ctx, eventCh, countDelta{userID: p.FollowerID, followingCount: 1}, event.TopicFollow)
@@ -191,10 +212,13 @@ func (c *CountConsumer) Start(ctx context.Context) error {
 	// ── TopicUnfollow → following_count -1 (follower) & follower_count -1 ──
 	go func() {
 		defer subWg.Done()
-		_ = c.bus.Subscribe(ctx, event.TopicUnfollow, func(_ context.Context, payload []byte) error {
+		_ = c.bus.Subscribe(ctx, event.TopicUnfollow, func(hctx context.Context, payload []byte) error {
 			var p event.UnfollowEvent
 			if err := json.Unmarshal(payload, &p); err != nil {
 				zap.L().Warn("count consumer: unmarshal UnfollowEvent", zap.Error(err))
+				return nil
+			}
+			if c.dedupSeen(hctx, event.TopicUnfollow, p.EventID) {
 				return nil
 			}
 			c.send(ctx, eventCh, countDelta{userID: p.FollowerID, followingCount: -1}, event.TopicUnfollow)
@@ -205,6 +229,22 @@ func (c *CountConsumer) Start(ctx context.Context) error {
 
 	c.flushLoop(ctx, eventCh, &subWg)
 	return nil
+}
+
+// dedupSeen reports whether the event id has already been processed.
+// Centralised so all five subscribe goroutines share the same fail-open
+// policy on Redis errors (process the event; drift is preferable to loss).
+func (c *CountConsumer) dedupSeen(ctx context.Context, topic, eventID string) bool {
+	seen, err := c.dedup.SeenOrMark(ctx, topic, eventID)
+	if err != nil {
+		zap.L().Warn("count consumer: dedup check failed (fail-open)",
+			zap.String("topic", topic),
+			zap.String("event_id", eventID),
+			zap.Error(err),
+		)
+		return false
+	}
+	return seen
 }
 
 // send pushes one delta onto eventCh, honouring ctx cancellation so a

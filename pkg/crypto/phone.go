@@ -7,9 +7,22 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 )
+
+// ErrEmptyKey is returned by EncryptPhone / DecryptPhone when keyHex is "".
+//
+// Step 18 changes the dev-mode "empty key → passthrough" contract to
+// fail-closed semantics: empty key always returns this sentinel so that
+// a misconfigured release deployment (env var not injected) refuses to
+// silently write plaintext phones to the users table (TD-CRYPTO-01).
+//
+// Callers can errors.Is against this value to map to a domain error
+// (e.g. errcode.ErrPhoneKeyMissing) without importing pkg/errcode here
+// and creating a layered cycle.
+var ErrEmptyKey = errors.New("crypto: phone encryption key is empty")
 
 // EncryptPhone encrypts a plaintext phone number with AES-256-GCM.
 //
@@ -17,12 +30,12 @@ import (
 // Total base64 length ≈ ceil((12 + len(plain) + 16) / 3) * 4 ≈ 52–60 chars
 // for an 11-digit phone — well within the VARCHAR(200) column.
 //
-// When keyHex is empty, the plaintext is returned unchanged.
-// This allows dev environments to run without configuring a key
-// while keeping the code path identical to production.
+// Empty keyHex is rejected with ErrEmptyKey (fail-closed, Step 18).
+// Dev environments MUST supply a key (configs/config.yaml ships a marked
+// DEV-ONLY test key); production MUST inject APP_ENCRYPTION_PHONE_KEY.
 func EncryptPhone(plaintext, keyHex string) (string, error) {
 	if keyHex == "" {
-		return plaintext, nil
+		return "", ErrEmptyKey
 	}
 
 	key, err := hex.DecodeString(keyHex)
@@ -52,11 +65,11 @@ func EncryptPhone(plaintext, keyHex string) (string, error) {
 
 // DecryptPhone decrypts a ciphertext produced by EncryptPhone.
 //
-// When keyHex is empty, the ciphertext is returned unchanged
-// (mirrors the dev-mode no-op in EncryptPhone so round-trips stay consistent).
+// Empty keyHex is rejected with ErrEmptyKey (fail-closed, Step 18) — see
+// EncryptPhone for rationale and dev-environment guidance.
 func DecryptPhone(ciphertext, keyHex string) (string, error) {
 	if keyHex == "" {
-		return ciphertext, nil
+		return "", ErrEmptyKey
 	}
 
 	key, err := hex.DecodeString(keyHex)

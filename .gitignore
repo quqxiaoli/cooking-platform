@@ -1,5 +1,9 @@
 # ── Secrets (never commit) ────────────────────────────────────────────────────
-.env
+# Match any .env* variant (.env, .env.prod, .env.local, ...) and re-allow
+# the committed *.example templates below so dev onboarding still works.
+.env*
+!.env.example
+!.env.prod.example
 *.pem
 *.key
 *.p12
