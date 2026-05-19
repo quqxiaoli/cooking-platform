@@ -11,7 +11,7 @@ server:
   shutdown_timeout: 30s
 
 database:
-  dsn: "<DB_USER>:<DB_PASSWORD>@tcp(mysql-master:3306)/cooking_platform?charset=utf8mb4&parseTime=True&loc=Local&timeout=5s"
+  dsn: "<DB_USER>:<DB_PASSWORD>@tcp(mysql:3306)/cooking_platform?charset=utf8mb4&parseTime=True&loc=Local&timeout=5s"
   # [Step 14] Replica DSNs for DBResolver read-write splitting.
   # Add more entries to distribute read load across multiple slaves.
   # In Docker Compose prod, slave container name is mysql-slave (port 3306 internal).
@@ -57,7 +57,7 @@ mq:
 # access_key_id / access_key_secret injected via env:
 #   APP_SMS_ACCESS_KEY_ID / APP_SMS_ACCESS_KEY_SECRET
 sms:
-  provider: aliyun
+  provider: mock
   access_key_id: "<SMS_ACCESS_KEY_ID>"
   access_key_secret: "<SMS_ACCESS_KEY_SECRET>"
   sign_name: "<SMS_SIGN_NAME>"
@@ -71,7 +71,7 @@ sms:
 # Use a dedicated RAM sub-account with Green-read-only permissions
 # (principle of least privilege — do NOT share with SMS or OSS key).
 audit:
-  provider: aliyun
+  provider: mock
   access_key_id: "<AUDIT_ACCESS_KEY_ID>"
   access_key_secret: "<AUDIT_ACCESS_KEY_SECRET>"
   region: cn-shanghai

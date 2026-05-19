@@ -272,6 +272,7 @@ func Load() (*Config, error) {
 	v.SetEnvPrefix("APP")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
+	_ = v.BindEnv("database.dsn", "APP_DATABASE_DSN")
 
 	registerDefaults(v)
 
