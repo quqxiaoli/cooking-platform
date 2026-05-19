@@ -88,9 +88,9 @@ oss:
   provider: aliyun
   access_key_id: "<OSS_ACCESS_KEY_ID>"
   access_key_secret: "<OSS_ACCESS_KEY_SECRET>"
-  endpoint: oss-cn-beijing.aliyuncs.com
-  bucket: cooking-prod
-  url_prefix: "https://cooking-prod.oss-cn-beijing.aliyuncs.com/"
+  endpoint: oss-cn-hongkong.aliyuncs.com
+  bucket: cooking-platform-prod
+  url_prefix: "https://cooking-platform-prod.oss-cn-hongkong.aliyuncs.com/"
   presign_ttl: 15m
   max_image_size: 5242880     # 5 MiB
   upload_hourly: 30
