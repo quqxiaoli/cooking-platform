@@ -288,6 +288,14 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
 
+	// Viper 已知问题：Unmarshal 对仅通过 BindEnv 绑定、且 yaml 中存在同名 key
+	// 的嵌套字段，会优先取 yaml 值而非 env 值。这里在反序列化后手动用
+	// v.GetString 强制以 env/BindEnv 解析结果为准（GetString 走的是 Get 路径，
+	// BindEnv 在该路径上可靠生效）。
+	if dsn := v.GetString("database.dsn"); dsn != "" {
+		cfg.Database.DSN = dsn
+	}
+
 	if err := validate(&cfg); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}
