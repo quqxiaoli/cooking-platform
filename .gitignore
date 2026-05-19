@@ -8,6 +8,8 @@
 *.key
 *.p12
 *.pfx
+# Plaintext secret backup used to rebuild .env.prod after server wipe.
+docs/prod.md
 
 # ── Build artefacts ───────────────────────────────────────────────────────────
 bin/

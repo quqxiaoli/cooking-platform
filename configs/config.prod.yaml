@@ -24,7 +24,7 @@ database:
   log_level: warn
 
 redis:
-  addr: "redis-master:6379"   # sentinel mode configured separately via env
+  addr: "redis:6379"   # compose service name; sentinel mode configured separately via env
   password: "<REDIS_PASSWORD>"
   db: 0
   pool_size: 20

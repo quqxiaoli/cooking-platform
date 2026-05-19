@@ -296,6 +296,18 @@ func Load() (*Config, error) {
 		cfg.Database.DSN = dsn
 	}
 
+	// APP_DATABASE_SLAVES_DSN: comma-separated. Empty/unset → keep yaml value.
+	// Viper's env→[]string handling is unreliable, so parse directly from os.
+	if raw := os.Getenv("APP_DATABASE_SLAVES_DSN"); raw != "" {
+		var dsns []string
+		for _, p := range strings.Split(raw, ",") {
+			if s := strings.TrimSpace(p); s != "" {
+				dsns = append(dsns, s)
+			}
+		}
+		cfg.Database.SlavesDSN = dsns
+	}
+
 	if err := validate(&cfg); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}
