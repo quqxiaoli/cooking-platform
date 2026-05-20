@@ -66,16 +66,24 @@ mysql_q() {
   docker exec "$container" mysql -uroot -p"$MYSQL_ROOT_PW" -N -B -e "$sql" 2>/dev/null
 }
 
-# 抓最新一条 [SMS MOCK] 验证码 —— prod 的 send-code 请求会被 Nginx 转给
-# app1 或 app2 之一，所以两边都要查，取时间最新那条。
-sms_code_latest() {
-  local merged
-  merged=$( {
-    docker logs --tail 200 "$APP1_CONTAINER" 2>&1 | grep '\[SMS MOCK\]' || true
-    docker logs --tail 200 "$APP2_CONTAINER" 2>&1 | grep '\[SMS MOCK\]' || true
-  } | sort )
-  # 取最后一行（最新），用与 verify_common.sh 相同的精确匹配避免误中手机号
-  echo "$merged" | tail -1 | grep -oE '"code":[[:space:]]*"[0-9]+"' | grep -oE '[0-9]+'
+# 抓某手机号最新一条 [SMS MOCK] 验证码。
+# prod 配置 log.console:false → stdout 为空，必须读容器内 /var/log/cooking/app.log
+# 的 zap JSON 日志。send-code 经 Nginx 负载均衡可能落 app1 也可能落 app2，两个
+# 实例都要查，按 phone 字段精确过滤避免拿到上一次测试的码，再用 jq 取 code 字段。
+fetch_sms_code() {
+  local phone="$1"
+  local line
+  line=$(
+    { docker exec "$APP1_CONTAINER" sh -c "grep -F '\"phone\":\"$phone\"' /var/log/cooking/app.log" 2>/dev/null;
+      docker exec "$APP2_CONTAINER" sh -c "grep -F '\"phone\":\"$phone\"' /var/log/cooking/app.log" 2>/dev/null; } \
+      | grep -F '[SMS MOCK] verification code sent' \
+      | tail -1
+  )
+  if [ -z "$line" ]; then
+    echo ""
+    return
+  fi
+  echo "$line" | jq -r '.code'
 }
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -107,14 +115,12 @@ done
 # ════════════════════════════════════════════════════════════════════════════
 section "§2 HTTPS 探活"
 
-http_root_main=$(curl -s -o /dev/null -w "%{http_code}" "https://mellowck.com/" || echo "000")
-assert_http_200 "$http_root_main" "https://mellowck.com/"
+# 应用只注册了 /health 和 /api/v1/...，没有 "/" 路由，所以不测根路径（会 404）
+http_health_apex=$(curl -s -o /dev/null -w "%{http_code}" "https://mellowck.com/health" || echo "000")
+assert_http_200 "$http_health_apex" "https://mellowck.com/health"
 
-http_root_www=$(curl -s -o /dev/null -w "%{http_code}" "https://www.mellowck.com/" || echo "000")
-assert_http_200 "$http_root_www" "https://www.mellowck.com/"
-
-http_health=$(curl -s -o /dev/null -w "%{http_code}" "https://mellowck.com/health" || echo "000")
-assert_http_200 "$http_health" "https://mellowck.com/health"
+http_health_www=$(curl -s -o /dev/null -w "%{http_code}" "https://www.mellowck.com/health" || echo "000")
+assert_http_200 "$http_health_www" "https://www.mellowck.com/health"
 
 # 80→443 301 跳转
 http_80=$(curl -s -o /dev/null -w "%{http_code}" "http://mellowck.com/" || echo "000")
@@ -144,10 +150,10 @@ info "  随机手机号 (用户 1): $PHONE1"
 curl -sS -X POST "$BASE/auth/send-code" \
   -H 'Content-Type: application/json' \
   -d "{\"phone\":\"$PHONE1\"}" >/dev/null
-sleep 0.5
+sleep 0.5   # 等日志刷盘
 
-CODE1=$(sms_code_latest)
-assert_nonempty "$CODE1" "从 docker logs 抓到验证码"
+CODE1=$(fetch_sms_code "$PHONE1")
+assert_nonempty "$CODE1" "从 app.log 抓到用户 1 验证码"
 info "  抓到验证码: $CODE1"
 
 LOGIN1=$(curl -sS -X POST "$BASE/auth/login" \
@@ -175,7 +181,8 @@ POST_RESP=$(curl -sS -X POST "$BASE/posts" \
   -d "{\"title\":\"$TITLE\",\"content\":\"$CONTENT\"}")
 
 assert_code 0 "$POST_RESP" "发帖返回 code=0"
-POST_ID=$(echo "$POST_RESP" | jq -r '.data.id // .data.post_id // empty')
+info "  发帖完整响应: $POST_RESP"
+POST_ID=$(echo "$POST_RESP" | jq -r '.data.id // .data.post.id // .data.post_id // empty')
 assert_nonempty "$POST_ID" "抓到 post_id"
 info "  post_id = $POST_ID"
 
@@ -217,10 +224,10 @@ info "  随机手机号 (用户 2): $PHONE2"
 curl -sS -X POST "$BASE/auth/send-code" \
   -H 'Content-Type: application/json' \
   -d "{\"phone\":\"$PHONE2\"}" >/dev/null
-sleep 0.5
+sleep 0.5   # 等日志刷盘
 
-CODE2=$(sms_code_latest)
-assert_nonempty "$CODE2" "从 docker logs 抓到用户 2 验证码"
+CODE2=$(fetch_sms_code "$PHONE2")
+assert_nonempty "$CODE2" "从 app.log 抓到用户 2 验证码"
 
 LOGIN2=$(curl -sS -X POST "$BASE/auth/login" \
   -H 'Content-Type: application/json' \
