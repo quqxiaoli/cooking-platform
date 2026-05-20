@@ -31,8 +31,8 @@ MYSQL_ROOT_PW="${MYSQL_ROOT_PW:-${MYSQL_ROOT_PASSWORD:-}}"
 CTX_FILE="/tmp/stress_ctx_step20"
 RESULT_DIR="/tmp/stress_results_step20"
 
-WRK_THREADS="${WRK_THREADS:-4}"
-WRK_CONNS="${WRK_CONNS:-50}"
+WRK_THREADS="${WRK_THREADS:-1}"
+WRK_CONNS="${WRK_CONNS:-5}"           # 单 IP 自压测必须 ≤ nginx 100r/s + burst 20
 WRK_DURATION="${WRK_DURATION:-30s}"
 
 C_G='\033[0;32m'; C_R='\033[0;31m'; C_Y='\033[1;33m'; C_N='\033[0m'
@@ -181,12 +181,17 @@ ok "压测上下文写入 $CTX_FILE"
 # ════════════════════════════════════════════════════════════════════════════
 section "§3 wrk 压测（${WRK_THREADS}t / ${WRK_CONNS}c / ${WRK_DURATION}）"
 
+echo ""
+echo -e "${C_Y}注：单机自压测受 nginx per-IP 100r/s 限流，无法测极限 QPS。${C_N}"
+echo -e "${C_Y}本步用 ${WRK_THREADS}t/${WRK_CONNS}c 测「合理负载下的延迟分布」P50/P90/P99。${C_N}"
+echo -e "${C_Y}极限 QPS 需多节点客户端（k6 cloud / 分布式 wrk）才能测出。${C_N}"
+
 run_wrk() {
   local scene="$1"
   local out="$RESULT_DIR/${scene}.txt"
   shift
   info "→ 场景 [$scene]"
-  if wrk -t"$WRK_THREADS" -c"$WRK_CONNS" -d"$WRK_DURATION" "$@" 2>&1 | tee "$out" >/dev/null; then
+  if wrk --latency -t"$WRK_THREADS" -c"$WRK_CONNS" -d"$WRK_DURATION" "$@" 2>&1 | tee "$out" >/dev/null; then
     ok "[$scene] 压测完成 → $out"
   else
     bad "[$scene] 压测失败"
@@ -281,21 +286,21 @@ summarize() {
     printf "  %-8s  (no result file)\n" "$scene"
     return
   fi
-  local qps p50 p95 p99 nonok total errs
+  local qps p50 p90 p99 nonok total errs
   qps=$(grep -E '^Requests/sec:' "$out"   | awk '{print $2}')
   p50=$(grep -E '^\s+50%' "$out"          | awk '{print $2}')
-  p95=$(grep -E '^\s+95%' "$out"          | awk '{print $2}')
+  p90=$(grep -E '^\s+90%' "$out"          | awk '{print $2}')
   p99=$(grep -E '^\s+99%' "$out"          | awk '{print $2}')
   # wrk 错误：Non-2xx or 3xx responses / Socket errors
   nonok=$(grep -E 'Non-2xx or 3xx responses' "$out" | awk '{print $NF}')
   total=$(grep -E 'requests in' "$out" | awk '{print $1}')
   errs=$(grep -E '^\s+Socket errors' "$out" | sed -E 's/.*connect ([0-9]+).*read ([0-9]+).*write ([0-9]+).*timeout ([0-9]+).*/c=\1 r=\2 w=\3 t=\4/' || echo "-")
-  printf "  %-8s  QPS=%-10s  P50=%-8s  P95=%-8s  P99=%-8s  non2xx=%-6s total=%-7s  sockets=%s\n" \
-    "$scene" "${qps:--}" "${p50:--}" "${p95:--}" "${p99:--}" "${nonok:-0}" "${total:--}" "${errs:--}"
+  printf "  %-8s  QPS=%-10s  P50=%-8s  P90=%-8s  P99=%-8s  non2xx=%-6s total=%-7s  sockets=%s\n" \
+    "$scene" "${qps:--}" "${p50:--}" "${p90:--}" "${p99:--}" "${nonok:-0}" "${total:--}" "${errs:--}"
 }
 
 printf "  %-8s  %-14s  %-12s  %-12s  %-12s  %-12s %-12s %s\n" \
-  scene QPS P50 P95 P99 non2xx total sock_errors
+  scene QPS P50 P90 P99 non2xx total sock_errors
 echo  "  -----------------------------------------------------------------------------------------------"
 for scene in health feed detail search like; do
   summarize "$scene"
