@@ -172,17 +172,27 @@ assert_nonempty "$USER1_ID" "用户 1 拿到 user_id"
 section "§5 用户 1 发帖"
 
 MARK=$(date +%s)_$RANDOM
-TITLE="step20验证帖_${MARK}"
-CONTENT="step20验证内容_${MARK}_这是一段足够长的内容用于通过最小长度校验如果有的话"
+RANDOM_TOKEN="step20-$RANDOM-$(date -u +%s)"
+TITLE="Step 20 verify $RANDOM_TOKEN"
+CONTENT="verify_step20.sh end-to-end test post for $RANDOM_TOKEN mark=${MARK}"
+
+POST_BODY=$(jq -nc \
+  --arg title "$TITLE" \
+  --arg content "$CONTENT" \
+  '{
+    title: $title,
+    scene_tag: 1,
+    content: $content
+  }')
 
 POST_RESP=$(curl -sS -X POST "$BASE/posts" \
   -H "Authorization: Bearer $TOKEN1" \
   -H 'Content-Type: application/json' \
-  -d "{\"title\":\"$TITLE\",\"content\":\"$CONTENT\"}")
+  -d "$POST_BODY")
 
 assert_code 0 "$POST_RESP" "发帖返回 code=0"
 info "  发帖完整响应: $POST_RESP"
-POST_ID=$(echo "$POST_RESP" | jq -r '.data.id // .data.post.id // .data.post_id // empty')
+POST_ID=$(echo "$POST_RESP" | jq -r '.data.post_id // empty')
 assert_nonempty "$POST_ID" "抓到 post_id"
 info "  post_id = $POST_ID"
 
@@ -209,9 +219,13 @@ assert_eq "array" "$POSTS_TYPE" "data.posts 是数组"
 # ════════════════════════════════════════════════════════════════════════════
 section "§7 详情页 GET /posts/:id"
 
-DETAIL=$(curl -sS "$BASE/posts/$POST_ID")
-# 刚发的帖子可能在 pending_review，业务码非 0 但属正常 —— 接受 0 或 42XXXX 系列
-assert_code_in "0|42[0-9]{4}" "$DETAIL" "详情页返回 code=0 或 42YZZZ 系列（pending 也算 OK）"
+if [ -z "$POST_ID" ]; then
+  warn "§5 发帖未拿到 post_id，跳过 §7 详情页测试"
+else
+  DETAIL=$(curl -sS "$BASE/posts/$POST_ID")
+  # 刚发的帖子可能在 pending_review，业务码非 0 但属正常 —— 接受 0 或 42XXXX 系列
+  assert_code_in "0|42[0-9]{4}" "$DETAIL" "详情页返回 code=0 或 42YZZZ 系列（pending 也算 OK）"
+fi
 
 # ════════════════════════════════════════════════════════════════════════════
 # §8 点赞（用户 2 → 用户 1 的帖子）
@@ -239,21 +253,25 @@ USER2_ID=$(echo "$LOGIN2" | jq -r '.data.user.id')
 assert_nonempty "$TOKEN2"   "用户 2 拿到 access_token"
 assert_nonempty "$USER2_ID" "用户 2 拿到 user_id"
 
-LIKE_RESP=$(curl -sS -X POST "$BASE/posts/$POST_ID/like" \
-  -H "Authorization: Bearer $TOKEN2")
-LIKE_CODE=$(echo "$LIKE_RESP" | jq -r '.code')
-case "$LIKE_CODE" in
-  0)
-    ok "点赞返回 code=0"
-    ;;
-  42*|43*)
-    # 业务规则可能要求"已审核才能交互"，对刚发的 pending 帖子返回业务错误码是合理的
-    warn "点赞返回业务错误码 code=$LIKE_CODE（pending 内容不可交互？）—— 跳过断言"
-    ;;
-  *)
-    bad "点赞返回未预期 code=$LIKE_CODE，响应: $LIKE_RESP"
-    ;;
-esac
+if [ -z "$POST_ID" ]; then
+  warn "§5 发帖未拿到 post_id，跳过 §8 点赞测试"
+else
+  LIKE_RESP=$(curl -sS -X POST "$BASE/posts/$POST_ID/like" \
+    -H "Authorization: Bearer $TOKEN2")
+  LIKE_CODE=$(echo "$LIKE_RESP" | jq -r '.code')
+  case "$LIKE_CODE" in
+    0)
+      ok "点赞返回 code=0"
+      ;;
+    42*|43*)
+      # 业务规则可能要求"已审核才能交互"，对刚发的 pending 帖子返回业务错误码是合理的
+      warn "点赞返回业务错误码 code=$LIKE_CODE（pending 内容不可交互？）—— 跳过断言"
+      ;;
+    *)
+      bad "点赞返回未预期 code=$LIKE_CODE，响应: $LIKE_RESP"
+      ;;
+  esac
+fi
 
 # ════════════════════════════════════════════════════════════════════════════
 # §9 关注（用户 2 → 用户 1）
