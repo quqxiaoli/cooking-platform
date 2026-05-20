@@ -222,9 +222,24 @@ section "§7 详情页 GET /posts/:id"
 if [ -z "$POST_ID" ]; then
   warn "§5 发帖未拿到 post_id，跳过 §7 详情页测试"
 else
-  DETAIL=$(curl -sS "$BASE/posts/$POST_ID")
-  # 刚发的帖子可能在 pending_review，业务码非 0 但属正常 —— 接受 0 或 42XXXX 系列
-  assert_code_in "0|42[0-9]{4}" "$DETAIL" "详情页返回 code=0 或 42YZZZ 系列（pending 也算 OK）"
+  DETAIL_RESP=$(curl -sS "$BASE/posts/$POST_ID")
+  DETAIL_CODE=$(echo "$DETAIL_RESP" | jq -r '.code')
+  # 合法响应码三类：
+  #   - code=0          审核已通过 / 内容可见，正常返回
+  #   - code=412104     通用扩展段（41xxxx）："post not found" —— 帖子 pending_review
+  #                     时对未授权读者返回此码，是 PRD 审核状态机的正确行为
+  #   - code=42[0-9]{4} 内容模块业务错误（pending / deleted 等显式语义）
+  case "$DETAIL_CODE" in
+    0|412104)
+      ok "详情页返回合法响应码 code=$DETAIL_CODE（0=可见，412104=pending 不可见）"
+      ;;
+    42[0-9][0-9][0-9][0-9])
+      ok "详情页返回内容模块业务码 code=$DETAIL_CODE"
+      ;;
+    *)
+      bad "详情页返回未预期 code=$DETAIL_CODE，响应: $DETAIL_RESP"
+      ;;
+  esac
 fi
 
 # ════════════════════════════════════════════════════════════════════════════
