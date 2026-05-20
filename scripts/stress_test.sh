@@ -78,6 +78,13 @@ fetch_sms_code() {
 section "§1 前置检查"
 
 command -v wrk  >/dev/null && ok "wrk 已安装"  || { bad "需要 wrk (apt-get install -y wrk)"; exit 1; }
+# wrk 必须支持 -R（rate-limit）—— Cloudflare fork 4.1.0 没有，原版 4.2.0+ 有
+if ! wrk --help 2>&1 | grep -qE '\-R|--rate'; then
+  bad "wrk 不支持 -R flag（可能是 Debian 老版 4.1.0）—— 请从源码装原版 wrk 4.2.0+"
+  bad "  rm -rf /tmp/wrk-src && git clone https://github.com/wg/wrk.git /tmp/wrk-src && cd /tmp/wrk-src && make && cp wrk /usr/local/bin/wrk && hash -r"
+  exit 1
+fi
+ok "wrk 支持 -R rate-limit"
 command -v jq   >/dev/null && ok "jq 已安装"   || { bad "需要 jq";   exit 1; }
 command -v curl >/dev/null && ok "curl 已安装" || { bad "需要 curl"; exit 1; }
 
@@ -194,10 +201,12 @@ run_wrk() {
   local out="$RESULT_DIR/${scene}.txt"
   shift
   info "→ 场景 [$scene]"
-  if wrk --latency -R"$WRK_RATE" -t"$WRK_THREADS" -c"$WRK_CONNS" -d"$WRK_DURATION" "$@" 2>&1 | tee "$out" >/dev/null; then
+  wrk --latency -R"$WRK_RATE" -t"$WRK_THREADS" -c"$WRK_CONNS" -d"$WRK_DURATION" "$@" >"$out" 2>&1
+  local rc=$?
+  if [ "$rc" -eq 0 ]; then
     ok "[$scene] 压测完成 → $out"
   else
-    bad "[$scene] 压测失败"
+    bad "[$scene] 压测失败（wrk exit=$rc）—— 见 $out"
   fi
 }
 
