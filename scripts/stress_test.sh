@@ -182,7 +182,8 @@ ok "压测上下文写入 $CTX_FILE"
 section "§3 wrk 压测（${WRK_THREADS}t / ${WRK_CONNS}c / ${WRK_DURATION}）"
 
 run_wrk() {
-  local scene="$1" out="$RESULT_DIR/${scene}.txt"
+  local scene="$1"
+  local out="$RESULT_DIR/${scene}.txt"
   shift
   info "→ 场景 [$scene]"
   if wrk -t"$WRK_THREADS" -c"$WRK_CONNS" -d"$WRK_DURATION" "$@" 2>&1 | tee "$out" >/dev/null; then
