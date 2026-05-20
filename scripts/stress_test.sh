@@ -147,6 +147,11 @@ if [ -z "$POST_ID" ]; then bad "发帖失败: $POST_RESP"; exit 1; fi
 ok "发帖成功 post_id=$POST_ID"
 
 # —— 用户 2（点赞人） ——
+# prod-only 临时回避：单机自压测两次 send-code 共用同一出口 IP，会被应用层
+# SMS per-IP 限流挡住。真实生产场景用户来自不同 IP，不会有此问题。
+info "等待 8 秒让 SMS 限流自然衰减（防止两次 send-code 间隔过短）"
+sleep 8
+
 PHONE2="138$(printf '%08d' $(((RANDOM*RANDOM+1) % 100000000)))"
 info "  用户 2 手机号: $PHONE2"
 
