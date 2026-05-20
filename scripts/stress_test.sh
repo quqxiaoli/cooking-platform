@@ -31,9 +31,11 @@ MYSQL_ROOT_PW="${MYSQL_ROOT_PW:-${MYSQL_ROOT_PASSWORD:-}}"
 CTX_FILE="/tmp/stress_ctx_step20"
 RESULT_DIR="/tmp/stress_results_step20"
 
-WRK_THREADS="${WRK_THREADS:-1}"
-WRK_CONNS="${WRK_CONNS:-5}"           # 单 IP 自压测必须 ≤ nginx 100r/s + burst 20
+WRK_THREADS="${WRK_THREADS:-2}"
+WRK_CONNS="${WRK_CONNS:-50}"       # 必须 >= WRK_RATE 才能让 -R 生效（连接池容量）
 WRK_DURATION="${WRK_DURATION:-30s}"
+WRK_RATE="${WRK_RATE:-80}"         # 目标 RPS；nginx api_zone 上限 100 r/s + burst 20，
+                                   # 80 留 20% margin
 
 C_G='\033[0;32m'; C_R='\033[0;31m'; C_Y='\033[1;33m'; C_N='\033[0m'
 
@@ -182,8 +184,9 @@ ok "压测上下文写入 $CTX_FILE"
 section "§3 wrk 压测（${WRK_THREADS}t / ${WRK_CONNS}c / ${WRK_DURATION}）"
 
 echo ""
-echo -e "${C_Y}注：单机自压测受 nginx per-IP 100r/s 限流，无法测极限 QPS。${C_N}"
-echo -e "${C_Y}本步用 ${WRK_THREADS}t/${WRK_CONNS}c 测「合理负载下的延迟分布」P50/P90/P99。${C_N}"
+echo -e "${C_Y}注：单机自压测受 nginx per-IP 100r/s 限流。${C_N}"
+echo -e "${C_Y}本步用 wrk -R${WRK_RATE} 限速模式（${WRK_THREADS}t/${WRK_CONNS}c）确保所有${C_N}"
+echo -e "${C_Y}请求穿过限流到达 backend，测「nginx + Go app 真实端到端延迟分布」。${C_N}"
 echo -e "${C_Y}极限 QPS 需多节点客户端（k6 cloud / 分布式 wrk）才能测出。${C_N}"
 
 run_wrk() {
@@ -191,7 +194,7 @@ run_wrk() {
   local out="$RESULT_DIR/${scene}.txt"
   shift
   info "→ 场景 [$scene]"
-  if wrk --latency -t"$WRK_THREADS" -c"$WRK_CONNS" -d"$WRK_DURATION" "$@" 2>&1 | tee "$out" >/dev/null; then
+  if wrk --latency -R"$WRK_RATE" -t"$WRK_THREADS" -c"$WRK_CONNS" -d"$WRK_DURATION" "$@" 2>&1 | tee "$out" >/dev/null; then
     ok "[$scene] 压测完成 → $out"
   else
     bad "[$scene] 压测失败"
@@ -288,9 +291,9 @@ summarize() {
   fi
   local qps p50 p90 p99 nonok total errs
   qps=$(grep -E '^Requests/sec:' "$out"   | awk '{print $2}')
-  p50=$(grep -E '^\s+50%' "$out"          | awk '{print $2}')
-  p90=$(grep -E '^\s+90%' "$out"          | awk '{print $2}')
-  p99=$(grep -E '^\s+99%' "$out"          | awk '{print $2}')
+  p50=$(grep -E '^\s+50(\.000)?%' "$out"  | awk '{print $2}')
+  p90=$(grep -E '^\s+90(\.000)?%' "$out"  | awk '{print $2}')
+  p99=$(grep -E '^\s+99(\.000)?%' "$out"  | awk '{print $2}')
   # wrk 错误：Non-2xx or 3xx responses / Socket errors
   nonok=$(grep -E 'Non-2xx or 3xx responses' "$out" | awk '{print $NF}')
   total=$(grep -E 'requests in' "$out" | awk '{print $1}')
