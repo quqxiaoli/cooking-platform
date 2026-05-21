@@ -170,6 +170,16 @@ verify-step16: ## 运行 Step 16 Prometheus + Grafana 监控端到端验证
 verify-step17: ## 运行 Step 17 GitHub Actions CI/CD + PRD v3.0 验证
 	@bash scripts/verify_step17.sh
 
+## verify-step20: 运行 Step 20 公网验证（HTTPS + 业务流 + 主从读写分离实证）
+.PHONY: verify-step20
+verify-step20: ## 运行 Step 20 公网验证（HTTPS + 业务流 + 主从读写分离实证）
+	@bash scripts/verify_step20.sh
+
+## stress-test: 跑 Step 20 阶段 4 压测（5 个核心接口 + Consumer 异步落库延迟）
+.PHONY: stress-test
+stress-test: ## 跑 Step 20 阶段 4 压测
+	@bash scripts/stress_test.sh
+
 ## check-config-parity: 校验 dev/docker/prod 三份 yaml 顶级 key 集合一致
 .PHONY: check-config-parity
 check-config-parity: ## 校验 configs/{config,config.docker,config.prod}.yaml 顶级 key 一致

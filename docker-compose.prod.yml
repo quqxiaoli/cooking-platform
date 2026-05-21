@@ -234,6 +234,8 @@ services:
     volumes:
       - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./deploy/nginx/certs:/etc/nginx/certs:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - ./deploy/certbot/webroot:/var/www/certbot:ro
     depends_on:
       app1:
         condition: service_healthy
