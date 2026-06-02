@@ -123,6 +123,18 @@ type PostRepository interface {
 	// audit state transition explicit and auditable: grep for
 	// UpdateAuditStatus to find every code path that changes visibility.
 	UpdateAuditStatus(ctx context.Context, postID int64, auditStatus, isVisible uint8, remark string) error
+
+	// SoftDeleteByOwner marks the post as soft-deleted (deleted_at = NOW())
+	// only when the row exists, is not yet deleted, AND belongs to ownerID.
+	// Returns (affected, err) — affected==1 means the row was deleted by
+	// this call; affected==0 means either the post is gone / already
+	// deleted, or it is not owned by ownerID (the service layer
+	// disambiguates the two via a prior FindByID lookup).
+	//
+	// The ownership predicate is embedded in the UPDATE WHERE clause so we
+	// never race with a concurrent delete: at most one caller can flip
+	// deleted_at from NULL to a non-NULL value.
+	SoftDeleteByOwner(ctx context.Context, postID, ownerID int64) (int64, error)
 }
 
 // postRepository is the GORM-backed implementation. Lowercase by design —
@@ -256,6 +268,33 @@ func (r *postRepository) UpdateAuditStatus(ctx context.Context, postID int64, au
 			"is_visible":   isVisible,
 			"audit_remark": remark,
 		}).Error
+}
+
+// SoftDeleteByOwner runs a single UPDATE that sets deleted_at = NOW(3) only
+// for the (id, user_id, deleted_at IS NULL) tuple. The atomic predicate is
+// the whole point: two concurrent deletes can both win the FindByID lookup
+// in the service layer, but only one will see a non-zero RowsAffected here.
+//
+// We use raw GORM `Update(...)` against the *posts* table directly rather
+// than `Delete(&Post{})` so that:
+//
+//  1. The ownership predicate is enforced server-side (defence in depth on
+//     top of the service-layer ownership check).
+//  2. RowsAffected can be returned to the caller as an authoritative
+//     "did this call actually delete the row" signal.
+//
+// updated_at is intentionally NOT touched — soft-deleting is not the same
+// as a content edit, and audit / debugging benefits from updated_at staying
+// at the last real mutation.
+func (r *postRepository) SoftDeleteByOwner(ctx context.Context, postID, ownerID int64) (int64, error) {
+	res := r.db.WithContext(ctx).
+		Model(&model.Post{}).
+		Where("id = ? AND user_id = ? AND deleted_at IS NULL", postID, ownerID).
+		Update("deleted_at", time.Now())
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	return res.RowsAffected, nil
 }
 
 // ListByUser runs the author-page feed query.

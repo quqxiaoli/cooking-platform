@@ -471,6 +471,10 @@ func setupRouter(
 			postHandler.Create,
 		)
 		postGroup.GET("/:id", postHandler.GetDetail)
+		postGroup.DELETE("/:id",
+			middleware.Auth(tokenVerifier),
+			postHandler.Delete,
+		)
 
 		postGroup.POST("/:id/like",
 			middleware.Auth(tokenVerifier),

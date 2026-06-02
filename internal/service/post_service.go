@@ -192,6 +192,69 @@ func (s *PostService) Create(ctx context.Context, userID int64, req dto.CreatePo
 	}, nil
 }
 
+// ── Delete ──────────────────────────────────────────────────────────────────
+
+// Delete soft-deletes the caller's own post.
+//
+// Authorisation rule: only the post's author can delete it. The check
+// happens in two places, by design (defence in depth):
+//
+//  1. FindByID + service-layer compare — gives the caller a precise error
+//     code (ErrPostNotFound vs ErrPostForbidden) without leaking existence
+//     of others' posts beyond a single-bit yes/no signal they already get
+//     from GetDetail.
+//
+//  2. SoftDeleteByOwner's `WHERE id=? AND user_id=? AND deleted_at IS NULL`
+//     — the repository UPDATE itself refuses to delete anything not owned
+//     by the caller, so a race between two concurrent Delete calls (or a
+//     bug in step 1) cannot soft-delete someone else's post.
+//
+// Side effects on success:
+//   - Publish PostDeletedEvent → CountConsumer decrements users.post_count
+//     with GREATEST(0, ...) clamping (mirrors unlike/unfollow).
+//   - Stamp the author's write-marker so their own author-page reads in
+//     the next ~5s are routed to the master (avoid "post still there" lag
+//     after deletion).
+//   - Bump feed version so the homepage / scene-filtered feed pages cached
+//     in Redis are invalidated — next reader rebuilds from MySQL.
+//
+// Children NOT touched:
+//   - post_steps rows remain in the table but are unreachable: detail-page
+//     LoadSteps is only called after FindByID succeeds, and FindByID now
+//     returns ErrPostNotFound for soft-deleted posts.
+//   - likes / post_views rows remain too, by the same logic; they were
+//     already orphan-tolerant in this codebase (no FK; readers only fetch
+//     them through their parent post).
+func (s *PostService) Delete(ctx context.Context, userID, postID int64) error {
+	p, err := s.postRepo.FindByID(ctx, postID)
+	if err != nil {
+		if errors.Is(err, repository.ErrPostNotFound) {
+			return errcode.ErrPostNotFound
+		}
+		return fmt.Errorf("find post: %w", err)
+	}
+
+	if p.UserID != userID {
+		return errcode.ErrPostForbidden
+	}
+
+	affected, err := s.postRepo.SoftDeleteByOwner(ctx, postID, userID)
+	if err != nil {
+		return fmt.Errorf("soft delete post: %w", err)
+	}
+	if affected == 0 {
+		// Lost a race with another Delete in flight — the post is already
+		// gone. Return NotFound (rather than ServerError) so the client can
+		// treat the operation as idempotent.
+		return errcode.ErrPostNotFound
+	}
+
+	s.writeMarker.Mark(ctx, userID)
+	s.publishPostDeletedEvent(ctx, p)
+	s.bumpFeedVersion(ctx, postID)
+	return nil
+}
+
 // ── GetDetail ───────────────────────────────────────────────────────────────
 
 // GetDetail loads a post by ID, attaches the author snapshot + steps, and
@@ -355,6 +418,28 @@ func (s *PostService) ListByUser(ctx context.Context, viewerID, authorID int64, 
 }
 
 // ── Private helpers ─────────────────────────────────────────────────────────
+
+func (s *PostService) publishPostDeletedEvent(ctx context.Context, p *model.Post) {
+	now := time.Now().UnixMilli()
+	payload := event.PostDeletedEvent{
+		EventID:   uuid.NewString(),
+		PostID:    p.ID,
+		AuthorID:  p.UserID,
+		Timestamp: now,
+	}
+	evt := event.Event{
+		ID:        payload.EventID,
+		Topic:     event.TopicPostDeleted,
+		Timestamp: now,
+		Payload:   event.MustMarshalPayload(payload),
+	}
+	if err := s.bus.Publish(ctx, evt); err != nil {
+		zap.L().Warn("publish post deleted event failed",
+			zap.Int64("post_id", p.ID),
+			zap.Error(err),
+		)
+	}
+}
 
 func (s *PostService) publishPostEvent(ctx context.Context, p *model.Post) {
 	now := time.Now().UnixMilli()

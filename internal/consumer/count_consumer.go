@@ -1,8 +1,8 @@
-// Package consumer — count_consumer.go consumes TopicPost + TopicLike +
-// TopicUnlike + TopicFollow + TopicUnfollow events and maintains the
-// redundant counters on the users table:
+// Package consumer — count_consumer.go consumes TopicPost + TopicPostDeleted +
+// TopicLike + TopicUnlike + TopicFollow + TopicUnfollow events and maintains
+// the redundant counters on the users table:
 //
-//	users.post_count       — incremented on every TopicPost event
+//	users.post_count       — incremented on TopicPost, decremented on TopicPostDeleted
 //	users.total_likes      — incremented on TopicLike, decremented on TopicUnlike
 //	users.following_count  — incremented/decremented on TopicFollow/TopicUnfollow
 //	                         (for the FollowerID — "how many I follow")
@@ -42,12 +42,11 @@
 //
 // ── Why GREATEST(0, ...) on every decrementable column ─────────────────────
 //
-// total_likes / follower_count / following_count are INT UNSIGNED.
-// Subtraction can underflow if a duplicate Unlike/Unfollow event slips
-// through (Channel mode shouldn't, but RabbitMQ at-least-once will).
-// GREATEST(0, CAST(... AS SIGNED) + ?) clamps to zero — see
-// like_repository.go's identical defense for the rationale. post_count is
-// append-only (no event ever decrements it) so it needs no clamp.
+// post_count / total_likes / follower_count / following_count are all
+// INT UNSIGNED. Subtraction can underflow if a duplicate Unlike / Unfollow /
+// PostDeleted event slips through (Channel mode shouldn't, but RabbitMQ
+// at-least-once will). GREATEST(0, CAST(... AS SIGNED) + ?) clamps to zero —
+// see like_repository.go's identical defense for the rationale.
 //
 // ── Batch sizing ───────────────────────────────────────────────────────────
 //
@@ -94,7 +93,7 @@ import (
 // one per affected user, each setting one field).
 type countDelta struct {
 	userID         int64
-	postCount      int64 // 0 or +1
+	postCount      int64 // -1, 0, or +1
 	totalLikes     int64 // -1, 0, or +1
 	followerCount  int64 // -1, 0, or +1
 	followingCount int64 // -1, 0, or +1
@@ -137,7 +136,7 @@ func (c *CountConsumer) Start(ctx context.Context) error {
 	eventCh := make(chan countDelta, c.batchSize*4)
 
 	var subWg sync.WaitGroup
-	subWg.Add(5)
+	subWg.Add(6)
 
 	// ── TopicPost → users.post_count +1 ─────────────────────────────────────
 	go func() {
@@ -152,6 +151,23 @@ func (c *CountConsumer) Start(ctx context.Context) error {
 				return nil
 			}
 			c.send(ctx, eventCh, countDelta{userID: p.AuthorID, postCount: 1}, event.TopicPost)
+			return nil
+		})
+	}()
+
+	// ── TopicPostDeleted → users.post_count -1 ──────────────────────────────
+	go func() {
+		defer subWg.Done()
+		_ = c.bus.Subscribe(ctx, event.TopicPostDeleted, func(hctx context.Context, payload []byte) error {
+			var p event.PostDeletedEvent
+			if err := json.Unmarshal(payload, &p); err != nil {
+				zap.L().Warn("count consumer: unmarshal PostDeletedEvent", zap.Error(err))
+				return nil
+			}
+			if c.dedupSeen(hctx, event.TopicPostDeleted, p.EventID) {
+				return nil
+			}
+			c.send(ctx, eventCh, countDelta{userID: p.AuthorID, postCount: -1}, event.TopicPostDeleted)
 			return nil
 		})
 	}()
@@ -350,8 +366,11 @@ func (c *CountConsumer) flushLoop(ctx context.Context, eventCh chan countDelta, 
 // GREATEST-clamped on every unsigned-decrementable column. Building "UPDATE
 // users SET <only changed columns>" also keeps slow-log lines grep-friendly.
 //
-// post_count is the one column with no GREATEST guard: no event ever emits a
-// negative post delta, so it cannot underflow.
+// post_count uses the same GREATEST(0, ...) guard as the other three columns
+// now that TopicPostDeleted can emit a -1 delta. The clamp is a defence
+// against duplicate redelivery (RabbitMQ at-least-once) inflating below zero
+// — the dedup cache already filters first-line duplicates, but the clamp is
+// the underflow safety net.
 func (c *CountConsumer) flush(ctx context.Context, postDeltas, likeDeltas, followerDeltas, followingDeltas map[int64]int64) int {
 	// Union of all user_ids touched across the four maps.
 	allUsers := make(map[int64]struct{}, len(postDeltas)+len(likeDeltas)+len(followerDeltas)+len(followingDeltas))
@@ -381,8 +400,7 @@ func (c *CountConsumer) flush(ctx context.Context, postDeltas, likeDeltas, follo
 		args := make([]any, 0, 5)
 
 		if pd != 0 {
-			// Append-only counter — no clamp needed.
-			setClauses = append(setClauses, "post_count = post_count + ?")
+			setClauses = append(setClauses, "post_count = GREATEST(0, CAST(post_count AS SIGNED) + ?)")
 			args = append(args, pd)
 		}
 		if ld != 0 {

@@ -12,9 +12,10 @@ const (
 	TopicPV       = "event.pv"
 	TopicAudit    = "event.audit"
 	TopicCount    = "event.count"
-	TopicPost     = "event.post"
-	TopicFollow   = "event.follow"   // [Step 8] 关注事件 → CountConsumer 维护双向计数
-	TopicUnfollow = "event.unfollow" // [Step 8] 取消关注事件 → CountConsumer 维护双向计数
+	TopicPost        = "event.post"
+	TopicPostDeleted = "event.post.deleted" // 删帖事件 → CountConsumer 把 users.post_count -1
+	TopicFollow      = "event.follow"       // [Step 8] 关注事件 → CountConsumer 维护双向计数
+	TopicUnfollow    = "event.unfollow"     // [Step 8] 取消关注事件 → CountConsumer 维护双向计数
 )
 
 // Event 是所有消息的信封结构。
@@ -89,6 +90,16 @@ type PostEvent struct {
 	PostID    int64  `json:"post_id"`
 	AuthorID  int64  `json:"author_id"`
 	SceneTag  int8   `json:"scene_tag"`
+	Timestamp int64  `json:"timestamp"`
+}
+
+// PostDeletedEvent 删帖事件，由 PostService.Delete() 在成功软删 posts 行后
+// 发布到 TopicPostDeleted。CountConsumer 消费时把 AuthorID 的 users.post_count
+// 减 1，并用 GREATEST(0, ...) 钳位防 unsigned 列下溢（与 unlike/unfollow 同模式）。
+type PostDeletedEvent struct {
+	EventID   string `json:"event_id"`
+	PostID    int64  `json:"post_id"`
+	AuthorID  int64  `json:"author_id"`
 	Timestamp int64  `json:"timestamp"`
 }
 

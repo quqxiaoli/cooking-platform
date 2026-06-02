@@ -104,6 +104,35 @@ func (h *PostHandler) GetDetail(c *gin.Context) {
 	response.Success(c, resp)
 }
 
+// Delete handles DELETE /api/v1/posts/:id.
+//
+// Route is wrapped by middleware.Auth — only the post's author can call
+// this endpoint successfully. Service-layer ownership check translates a
+// caller-doesn't-own-this-post attempt into ErrPostForbidden (403/412105);
+// a missing or already-deleted post returns ErrPostNotFound (404/412104).
+//
+// Idempotent by design: calling Delete twice on the same post id returns
+// 200 the first time and 404 the second time, never a 500.
+func (h *PostHandler) Delete(c *gin.Context) {
+	postID, err := parsePathID(c.Param("id"))
+	if err != nil {
+		response.BadRequest(c, errcode.ErrInvalidParams)
+		return
+	}
+
+	uid := middleware.GetUserID(c)
+	if uid == 0 {
+		response.Unauthorized(c, errcode.ErrUnauthorized)
+		return
+	}
+
+	if err := h.svc.Delete(c.Request.Context(), uid, postID); err != nil {
+		response.FromError(c, err)
+		return
+	}
+	response.Success(c, nil)
+}
+
 // parsePathID parses a positive int64 from a path param. Empty / non-numeric
 // / non-positive values all collapse to "invalid params" — the caller decides
 // the HTTP status.
