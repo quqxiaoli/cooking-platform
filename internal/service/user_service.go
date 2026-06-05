@@ -138,6 +138,11 @@ func (s *UserService) SendCode(ctx context.Context, phone, clientIP string) (*dt
 	}
 
 	if err := s.smsSender.SendCode(ctx, phone, code); err != nil {
+		zap.L().Error("sms sender failed",
+			zap.String("provider", s.smsCfg.Provider),
+			zap.String("phone_hash", phoneHash),
+			zap.Error(err),
+		)
 		_ = s.userCache.DeleteSMSCode(ctx, phoneHash)
 		return nil, fmt.Errorf("send sms: %w", err)
 	}
