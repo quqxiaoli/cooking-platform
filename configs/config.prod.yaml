@@ -64,17 +64,19 @@ mq:
   reconnect_max_retries: 5                        # 断线最多重试 5 次（指数退避 1s→2s→4s…上限 30s）
   reconnect_initial_delay: 1s
 
-# [Step 10] Production uses real Aliyun SMS.
+# [Step 10 / 2026-06-02 维护改造] Production uses Aliyun 号码认证服务 (dypns)
+# 的 SendSmsVerifyCode 接口，自带 code 模式。详见 docs/maintenance/2026-06-02_sms_dypns_migration.md。
 # access_key_id / access_key_secret injected via env:
 #   APP_SMS_ACCESS_KEY_ID / APP_SMS_ACCESS_KEY_SECRET
+# RAM 子账号需授权：AliyunDypnsFullAccess（不是 AliyunDysmsFullAccess）。
 sms:
-  provider: mock
+  provider: aliyun
   access_key_id: "<SMS_ACCESS_KEY_ID>"
   access_key_secret: "<SMS_ACCESS_KEY_SECRET>"
-  sign_name: "<SMS_SIGN_NAME>"
-  template_code: "<SMS_TEMPLATE_CODE>"
-  code_length: 6
-  code_ttl: 5m
+  sign_name: "速通互联验证码"           # dypns 赠送签名（个人账号无法自定义）
+  template_code: "100001"               # 赠送登录/注册模板：您的验证码为${code}。...${min}分钟内有效...
+  code_length: 6                        # 仍由 service 层用于自生成验证码
+  code_ttl: 5m                          # 同时驱动模板 ${min} 变量 = ceil(5m/60s) = 5
 
 # [Step 10] Content moderation — production uses real Aliyun Green service.
 # access_key_id / access_key_secret injected via env:

@@ -58,14 +58,15 @@ mq:
 # [Step 3] SMS provider configuration.
 # Dev uses 'mock' — verification codes are logged instead of sent.
 # Inspect logs to find the code: search for "[SMS MOCK]" in stdout.
+# Prod 走阿里云 dypns 号码认证服务（自带 code 模式），见 docs/maintenance/2026-06-02_sms_dypns_migration.md。
 sms:
   provider: mock          # mock | aliyun
   access_key_id: ""       # env: APP_SMS_ACCESS_KEY_ID  (aliyun only)
   access_key_secret: ""   # env: APP_SMS_ACCESS_KEY_SECRET (aliyun only)
-  sign_name: ""           # Aliyun signature, only used when provider=aliyun
-  template_code: ""       # Aliyun template ID, only used when provider=aliyun
+  sign_name: ""           # dypns 赠送签名名称（如 "速通互联验证码"），provider=aliyun 时必填
+  template_code: ""       # dypns 赠送模板 Code（如 "100001"），provider=aliyun 时必填
   code_length: 6
-  code_ttl: 5m
+  code_ttl: 5m            # 同时驱动模板 ${min} 变量 = ceil(code_ttl / 60s)
 
 # [Step 10] Content moderation configuration.
 # Dev uses 'mock' — AuditConsumer auto-approves posts immediately (mock_result=pass).
