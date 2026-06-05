@@ -259,6 +259,11 @@ services:
       CONFIG_PATH: configs/config.prod.yaml
       # All APP_* env vars below are consumed by Viper's AutomaticEnv()
       # (see pkg/config/config.go) — they override the matching yaml keys.
+      # 2026-06 stress rollback workaround：磁盘 yaml 已回滚但镜像里仍是压测版
+      # (sms.provider=mock + 高 ratelimit)。env 强制覆盖；下次 rebuild 后可删除以下 3 行。
+      APP_SMS_PROVIDER: aliyun
+      APP_RATELIMIT_SMS_PER_PHONE_PER_DAY: "5"
+      APP_RATELIMIT_SMS_PER_IP_PER_DAY: "10"
       APP_ENCRYPTION_PHONE_KEY: ${APP_ENCRYPTION_PHONE_KEY:?APP_ENCRYPTION_PHONE_KEY is required}
       APP_ENCRYPTION_PHONE_PEPPER: ${APP_ENCRYPTION_PHONE_PEPPER:?APP_ENCRYPTION_PHONE_PEPPER is required}
       APP_JWT_SECRET: ${APP_JWT_SECRET:?APP_JWT_SECRET is required (min 32 chars)}
@@ -300,6 +305,10 @@ services:
     restart: always
     environment:
       CONFIG_PATH: configs/config.prod.yaml
+      # 见 app1 同名 block 的说明：镜像里仍是压测版，env 强制覆盖。
+      APP_SMS_PROVIDER: aliyun
+      APP_RATELIMIT_SMS_PER_PHONE_PER_DAY: "5"
+      APP_RATELIMIT_SMS_PER_IP_PER_DAY: "10"
       APP_ENCRYPTION_PHONE_KEY: ${APP_ENCRYPTION_PHONE_KEY}
       APP_ENCRYPTION_PHONE_PEPPER: ${APP_ENCRYPTION_PHONE_PEPPER}
       APP_JWT_SECRET: ${APP_JWT_SECRET}

@@ -18,8 +18,8 @@
 set -u
 
 # ── 公共常量 ────────────────────────────────────────────────────────────────
-BASE="${BASE:-https://mellowck.com/api/v1}"
-HOST="${HOST:-https://mellowck.com}"
+BASE="${BASE:-https://api.mellowck.com/api/v1}"
+HOST="${HOST:-https://api.mellowck.com}"
 APP1_CONTAINER="${APP1_CONTAINER:-cooking-app1-prod}"
 APP2_CONTAINER="${APP2_CONTAINER:-cooking-app2-prod}"
 NGINX_CONTAINER="${NGINX_CONTAINER:-cooking-nginx-prod}"
@@ -29,7 +29,7 @@ REDIS_CONTAINER="${REDIS_CONTAINER:-cooking-redis-prod}"
 MYSQL_ROOT_PW="${MYSQL_ROOT_PW:-${MYSQL_ROOT_PASSWORD:-}}"
 
 CTX_FILE="/tmp/stress_ctx_step20"
-RESULT_DIR="/tmp/stress_results_step20"
+RESULT_DIR="${RESULT_DIR:-/tmp/stress_results_step20}"
 
 WRK_THREADS="${WRK_THREADS:-2}"
 WRK_CONNS="${WRK_CONNS:-50}"       # 必须 >= WRK_RATE 才能让 -R 生效（连接池容量）
@@ -230,6 +230,22 @@ run_wrk "search" -s scripts/stress/wrk_get_search.lua "$HOST"
 # e. POST /posts/:id/like
 run_wrk "like" -s scripts/stress/wrk_post_like.lua "$HOST"
 
+# ── 全面压测方案 §3 新增 4 场景（依赖 /tmp/stress_pool_*.tsv）─────────────
+# 仅在 pool 文件存在时跑，方便 Step 20 验收路径（无 pool）继续 work。
+if [ -f /tmp/stress_pool_users.tsv ] && [ -f /tmp/stress_pool_posts.tsv ]; then
+  info "  → 检测到 stress pool，启用 §3 扩展场景（delete_like / scene_feed / user_posts / follow）"
+  # f. DELETE /posts/:id/like
+  run_wrk "delete_like" -s scripts/stress/wrk_delete_like.lua "$HOST"
+  # g. GET /feed?scene_tag=N
+  run_wrk "scene_feed"  -s scripts/stress/wrk_get_scene_feed.lua "$HOST"
+  # h. GET /users/:id/posts
+  run_wrk "user_posts"  -s scripts/stress/wrk_get_user_posts.lua "$HOST"
+  # i. POST /users/:id/follow
+  run_wrk "follow"      -s scripts/stress/wrk_post_follow.lua "$HOST"
+else
+  warn "  未检测到 /tmp/stress_pool_*.tsv，跳过 §3 扩展 4 场景（如需跑全面压测请先执行 seed_stress_data.sh）"
+fi
+
 # ════════════════════════════════════════════════════════════════════════════
 # §4 Consumer 异步落库延迟实证
 # ════════════════════════════════════════════════════════════════════════════
@@ -311,10 +327,14 @@ summarize() {
     "$scene" "${qps:--}" "${p50:--}" "${p90:--}" "${p99:--}" "${nonok:-0}" "${total:--}" "${errs:--}"
 }
 
-printf "  %-8s  %-14s  %-12s  %-12s  %-12s  %-12s %-12s %s\n" \
+printf "  %-12s  %-14s  %-12s  %-12s  %-12s  %-12s %-12s %s\n" \
   scene QPS P50 P90 P99 non2xx total sock_errors
 echo  "  -----------------------------------------------------------------------------------------------"
-for scene in health feed detail search like; do
+# [全面压测临时变更] 汇总遍历 RESULTS_DIR 下所有 .txt（含 §3 扩展场景）；
+# Phase 9 回滚不需要回到硬编码 5 场景列表，本身就是改进。
+for f in "$RESULT_DIR"/*.txt; do
+  [ -f "$f" ] || continue
+  scene=$(basename "$f" .txt)
   summarize "$scene"
 done
 

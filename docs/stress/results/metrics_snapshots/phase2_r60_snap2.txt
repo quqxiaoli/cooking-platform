@@ -1,0 +1,27 @@
+=== [r60_extended_phase] 2026-06-05T12:10:20Z ===
+-- http rate by status (5xx focus) --
+  2xx  0.4666666666666667
+  4xx  49.93333333333334
+  5xx  0
+-- http p99 (s) --
+    0.010825000000000012
+-- mysql pool inuse/idle --
+app2:8080 cooking-platform   0
+app1:8080 cooking-platform   0
+app2:8080 cooking-platform   1
+app1:8080 cooking-platform   1
+-- consumer queue depth --
+app2:8080 cooking-platform   0
+app2:8080 cooking-platform   0
+app2:8080 cooking-platform   0
+app1:8080 cooking-platform   0
+app1:8080 cooking-platform   0
+app1:8080 cooking-platform   0
+-- rabbitmq dlx depth --
+app2:8080 cooking-platform   0
+app1:8080 cooking-platform   0
+-- goroutines --
+app2:8080 cooking-platform   93
+app1:8080 cooking-platform   102
+-- redis p99 (s) --
+    0.000496

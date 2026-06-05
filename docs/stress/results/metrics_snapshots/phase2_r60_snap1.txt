@@ -1,0 +1,27 @@
+=== [r60_running] 2026-06-05T12:07:33Z ===
+-- http rate by status (5xx focus) --
+  2xx  56.53333333333333
+  4xx  0
+  5xx  0
+-- http p99 (s) --
+    0.004961702127659574
+-- mysql pool inuse/idle --
+app2:8080 cooking-platform   0
+app1:8080 cooking-platform   0
+app2:8080 cooking-platform   1
+app1:8080 cooking-platform   1
+-- consumer queue depth --
+app2:8080 cooking-platform   0
+app2:8080 cooking-platform   0
+app2:8080 cooking-platform   0
+app1:8080 cooking-platform   0
+app1:8080 cooking-platform   0
+app1:8080 cooking-platform   0
+-- rabbitmq dlx depth --
+app2:8080 cooking-platform   0
+app1:8080 cooking-platform   0
+-- goroutines --
+app2:8080 cooking-platform   78
+app1:8080 cooking-platform   76
+-- redis p99 (s) --
+    0.0004960000000000001

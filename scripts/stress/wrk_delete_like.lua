@@ -1,15 +1,14 @@
--- wrk_post_like.lua: POST /api/v1/posts/:id/like
+-- wrk_delete_like.lua: DELETE /api/v1/posts/:id/like
 --
 -- 依赖：/tmp/stress_pool_users.tsv + /tmp/stress_pool_posts.tsv
 -- 由 scripts/stress/seed_stress_data.sh 生成。
 --
--- 每条请求随机挑一个 (user_token, post_id) 组合，避免单 (user, post) 反复命中
--- Redis 幂等去重导致只首条 2xx、其余 4xx 的失真（见 stress_issues_log.md #S7）。
--- POST like 本身幂等：第二次同组合也返回 2xx（业务层去重），所以这里测的是
--- 「热路径」+「Redis SET + MQ publish」+「Bloom filter 检查」综合开销。
+-- 每条请求随机挑一个 (user_token, post_id) 组合，避免热点偏置。
+-- DELETE like 是幂等接口，重复请求只是测请求路径与 cache invalidation 开销，
+-- 不验证状态正确性（service 层已有点赞模块单测覆盖）。
 
-local users = {}
-local posts = {}
+local users = {}   -- list of tokens
+local posts = {}   -- list of post_ids
 
 local function load_tsv(path, col_idx)
     local f = io.open(path, "r")
@@ -20,7 +19,7 @@ local function load_tsv(path, col_idx)
     local out = {}
     for line in f:lines() do
         if first then
-            first = false
+            first = false  -- skip header
         else
             local fields = {}
             for v in string.gmatch(line, "([^\t]+)") do
@@ -36,10 +35,13 @@ local function load_tsv(path, col_idx)
 end
 
 function init(args)
+    -- users.tsv columns: user_id\ttoken
     users = load_tsv("/tmp/stress_pool_users.tsv", 2)
+    -- posts.tsv columns: post_id\tscene_tag\tauthor_user_id
     posts = load_tsv("/tmp/stress_pool_posts.tsv", 1)
     if #users == 0 then error("user pool empty") end
     if #posts == 0 then error("post pool empty") end
+    -- 每线程独立随机种子（os.time + thread addr-ish）
     math.randomseed(os.time() + tonumber(tostring({}):sub(8)) or 0)
 end
 
@@ -50,5 +52,5 @@ function request()
         ["Authorization"] = "Bearer " .. token,
         ["Content-Type"]  = "application/json",
     }
-    return wrk.format("POST", "/api/v1/posts/" .. post_id .. "/like", headers, nil)
+    return wrk.format("DELETE", "/api/v1/posts/" .. post_id .. "/like", headers, nil)
 end
