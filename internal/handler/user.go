@@ -112,7 +112,9 @@ func (h *UserHandler) GetMyProfile(c *gin.Context) {
 	response.Success(c, profile)
 }
 
-// GetPublicProfile handles GET /api/v1/users/:id. Public endpoint.
+// GetPublicProfile handles GET /api/v1/users/:id. Public endpoint with
+// optional-auth: when a valid Bearer token is present the response carries
+// is_following resolved against the follow table; otherwise it stays false.
 func (h *UserHandler) GetPublicProfile(c *gin.Context) {
 	idStr := c.Param("id")
 	id, parseErr := strconv.ParseInt(idStr, 10, 64)
@@ -120,7 +122,8 @@ func (h *UserHandler) GetPublicProfile(c *gin.Context) {
 		response.FromError(c, errcode.ErrInvalidParams)
 		return
 	}
-	profile, err := h.svc.GetPublicProfile(c.Request.Context(), id)
+	viewerID := middleware.GetUserID(c) // 0 = anonymous (OptionalAuth)
+	profile, err := h.svc.GetPublicProfile(c.Request.Context(), viewerID, id)
 	if err != nil {
 		response.FromError(c, err)
 		return

@@ -26,6 +26,7 @@ package handler
 import (
 	"strconv"
 
+	"cooking-platform/internal/middleware"
 	"cooking-platform/internal/model/dto"
 	"cooking-platform/internal/service"
 	"cooking-platform/pkg/errcode"
@@ -57,7 +58,8 @@ func (h *FeedHandler) ListFeed(c *gin.Context) {
 		return
 	}
 
-	resp, err := h.svc.ListFeed(c.Request.Context(), q)
+	viewerID := middleware.GetUserID(c) // 0 = anonymous (OptionalAuth)
+	resp, err := h.svc.ListFeed(c.Request.Context(), viewerID, q)
 	if err != nil {
 		response.FromError(c, err)
 		return
@@ -89,7 +91,8 @@ func (h *FeedHandler) ListByUser(c *gin.Context) {
 		return
 	}
 
-	resp, err := h.svc.ListByUser(c.Request.Context(), authorID, cursor, size)
+	viewerID := middleware.GetUserID(c) // 0 = anonymous (OptionalAuth)
+	resp, err := h.svc.ListByUser(c.Request.Context(), viewerID, authorID, cursor, size)
 	if err != nil {
 		response.FromError(c, err)
 		return

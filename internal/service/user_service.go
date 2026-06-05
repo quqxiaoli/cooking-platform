@@ -42,6 +42,7 @@ import (
 // UserService is the entry point for all user-related business operations.
 type UserService struct {
 	repo        repository.UserRepository
+	followRepo  repository.FollowRepository // viewer-aware is_following on GetPublicProfile
 	userCache   *cache.UserCache
 	writeMarker *cache.WriteMarker // [Fix #1] read-after-write force-master hint
 	jwtMgr      *jwt.Manager
@@ -62,6 +63,7 @@ type UserService struct {
 // in dev — encryption degrades to a no-op (see pkg/crypto/phone.go).
 func NewUserService(
 	repo repository.UserRepository,
+	followRepo repository.FollowRepository,
 	userCache *cache.UserCache,
 	writeMarker *cache.WriteMarker,
 	jwtMgr *jwt.Manager,
@@ -73,6 +75,7 @@ func NewUserService(
 ) *UserService {
 	return &UserService{
 		repo:        repo,
+		followRepo:  followRepo,
 		userCache:   userCache,
 		writeMarker: writeMarker,
 		jwtMgr:      jwtMgr,
@@ -293,7 +296,16 @@ func (s *UserService) GetMyProfile(ctx context.Context, userID int64) (*dto.User
 }
 
 // GetPublicProfile returns any user's public profile (no PII).
-func (s *UserService) GetPublicProfile(ctx context.Context, userID int64) (*dto.UserPublicResp, error) {
+//
+// When viewerID > 0 and differs from userID, the response carries
+// is_following resolved against follow_repository.Exists — one indexed
+// SELECT on uk_follower_following. Anonymous callers (viewerID==0) and
+// self-views always see is_following=false.
+//
+// A follow-repo failure degrades silently to is_following=false: the
+// profile read itself is far more important than the follow badge, and a
+// follow-state hiccup should never 500 a public page.
+func (s *UserService) GetPublicProfile(ctx context.Context, viewerID, userID int64) (*dto.UserPublicResp, error) {
 	user, err := s.repo.FindByID(ctx, userID)
 	if err != nil {
 		if errors.Is(err, repository.ErrUserNotFound) {
@@ -302,6 +314,18 @@ func (s *UserService) GetPublicProfile(ctx context.Context, userID int64) (*dto.
 		return nil, fmt.Errorf("find user: %w", err)
 	}
 	resp := toPublicResp(user)
+	if viewerID > 0 && viewerID != userID && s.followRepo != nil {
+		following, fErr := s.followRepo.Exists(ctx, viewerID, userID)
+		if fErr != nil {
+			zap.L().Warn("is_following lookup failed; defaulting to false",
+				zap.Int64("viewer_id", viewerID),
+				zap.Int64("user_id", userID),
+				zap.Error(fErr),
+			)
+		} else {
+			resp.IsFollowing = following
+		}
+	}
 	return &resp, nil
 }
 

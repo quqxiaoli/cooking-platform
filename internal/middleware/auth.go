@@ -69,6 +69,34 @@ func Auth(v TokenVerifier) gin.HandlerFunc {
 	}
 }
 
+// OptionalAuth returns a middleware that populates the authenticated user_id
+// when a valid Bearer token is present, but never aborts the request. Used
+// on otherwise-public routes (e.g. /feed, /users/:id, /search) that want to
+// enrich the response with viewer-specific fields (is_following, liked_by_me)
+// without forcing login.
+//
+// Missing header, malformed scheme, expired / blacklisted / invalid tokens
+// all degrade silently — the request proceeds as anonymous (GetUserID
+// returns 0). This keeps the public-facing read path tolerant of clients
+// that drift their refresh window or forget to attach a header.
+func OptionalAuth(v TokenVerifier) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		token, err := extractBearerToken(c.GetHeader("Authorization"))
+		if err != nil {
+			c.Next()
+			return
+		}
+		uid, jti, err := v.VerifyAccessToken(c.Request.Context(), token)
+		if err != nil {
+			c.Next()
+			return
+		}
+		c.Set(ctxKeyUserID, uid)
+		c.Set(ctxKeyJTI, jti)
+		c.Next()
+	}
+}
+
 // GetUserID returns the authenticated user_id from the context, or 0 if the
 // request is unauthenticated. Handlers protected by Auth() can rely on the
 // value being non-zero; public handlers using this for optional-auth must

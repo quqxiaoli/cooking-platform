@@ -45,6 +45,7 @@ import (
 	"strconv"
 	"strings"
 
+	"cooking-platform/internal/cache"
 	"cooking-platform/internal/model/dto"
 	"cooking-platform/internal/repository"
 	"cooking-platform/pkg/config"
@@ -62,6 +63,7 @@ import (
 type SearchService struct {
 	searchRepo       repository.SearchRepository
 	assembler        *AuthorAssembler
+	likeCache        *cache.LikeCache // viewer-aware liked_by_me on result items
 	maxKeywordLen    int
 	booleanOperators string
 }
@@ -74,11 +76,13 @@ type SearchService struct {
 func NewSearchService(
 	searchRepo repository.SearchRepository,
 	assembler *AuthorAssembler,
+	likeCache *cache.LikeCache,
 	cfg config.SearchConfig,
 ) *SearchService {
 	return &SearchService{
 		searchRepo:       searchRepo,
 		assembler:        assembler,
+		likeCache:        likeCache,
 		maxKeywordLen:    cfg.MaxKeywordLen,
 		booleanOperators: cfg.BooleanOperators,
 	}
@@ -92,7 +96,7 @@ func NewSearchService(
 //  3. Decode the opaque cursor into an offset.
 //  4. Query size+1 rows from the FULLTEXT repository.
 //  5. Assemble author snapshots and the next cursor.
-func (s *SearchService) Search(ctx context.Context, q dto.SearchQuery) (*dto.SearchResp, error) {
+func (s *SearchService) Search(ctx context.Context, viewerID int64, q dto.SearchQuery) (*dto.SearchResp, error) {
 	// 1. Keyword normalisation & validation.
 	keyword := s.normaliseKeyword(q.Keyword)
 	if keyword == "" {
@@ -134,8 +138,11 @@ func (s *SearchService) Search(ctx context.Context, q dto.SearchQuery) (*dto.Sea
 		return nil, err
 	}
 
+	items := BuildListItems(rows, authorMap)
+	AttachLikedByMe(ctx, s.likeCache, viewerID, items)
+
 	resp := &dto.SearchResp{
-		Posts:      BuildListItems(rows, authorMap),
+		Posts:      items,
 		NextCursor: nextSearchCursor(offset, size, hasMore),
 		HasMore:    hasMore,
 	}

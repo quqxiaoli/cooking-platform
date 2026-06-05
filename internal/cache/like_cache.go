@@ -94,6 +94,48 @@ func keyLikeCount(postID int64) string {
 
 // ── Idempotency check ──────────────────────────────────────────────────────
 
+// BatchHasLiked probes SISMEMBER for one viewer across many posts via a
+// single Redis pipeline. Returns a map keyed by post_id with the liked state;
+// only true entries are guaranteed present (callers reading a missing key
+// should treat it as false).
+//
+// Used by feed / search / user-posts list rendering to populate the
+// per-item liked_by_me field without N round-trips. Cold posts whose
+// like:set:* key has aged out the 7-day TTL appear as false; that matches
+// the same gap GET /posts/:id/like-status has (Redis is the source of truth
+// for live like state — see file header).
+//
+// Empty postIDs or viewerID==0 returns (empty map, nil) without touching Redis.
+func (c *LikeCache) BatchHasLiked(ctx context.Context, viewerID int64, postIDs []int64) (map[int64]bool, error) {
+	out := make(map[int64]bool, len(postIDs))
+	if viewerID == 0 || len(postIDs) == 0 {
+		return out, nil
+	}
+
+	pipe := c.rdb.Pipeline()
+	cmds := make([]*redis.BoolCmd, len(postIDs))
+	for i, pid := range postIDs {
+		cmds[i] = pipe.SIsMember(ctx, keyLikeSet(pid), viewerID)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, fmt.Errorf("redis pipeline SISMEMBER like:set: %w", err)
+	}
+
+	for i, cmd := range cmds {
+		liked, err := cmd.Result()
+		if err != nil {
+			if errors.Is(err, redis.Nil) {
+				continue
+			}
+			return nil, fmt.Errorf("redis SISMEMBER like:set:%d: %w", postIDs[i], err)
+		}
+		if liked {
+			out[postIDs[i]] = true
+		}
+	}
+	return out, nil
+}
+
 // HasLiked reports whether userID has already liked postID.
 //
 // Returns (false, nil) on a Redis miss (key doesn't exist) — that's the

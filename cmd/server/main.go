@@ -147,6 +147,9 @@ func main() {
 	// can enforce the OSS whitelist on avatar_url updates.
 	userCache := cache.NewUserCache(rdb, cfg.Cache.UserSMSDailyTTL)
 	userRepo := repository.NewUserRepository(db)
+	// followRepo is constructed early so UserService can resolve is_following
+	// on GET /users/:id without depending on the full FollowService.
+	followRepo := repository.NewFollowRepository(db)
 	jwtMgr := jwtpkg.NewManager(cfg.JWT)
 
 	// [Fix #1] Shared write marker — Post/Follow/User services all stamp it on
@@ -160,7 +163,7 @@ func main() {
 	}
 	log.Info("sms sender initialized", zap.String("provider", cfg.SMS.Provider))
 
-	userSvc := service.NewUserService(userRepo, userCache, writeMarker, jwtMgr, smsSender, cfg.SMS, cfg.OSS, cfg.Encryption, cfg.Ratelimit)
+	userSvc := service.NewUserService(userRepo, followRepo, userCache, writeMarker, jwtMgr, smsSender, cfg.SMS, cfg.OSS, cfg.Encryption, cfg.Ratelimit)
 	userHandler := handler.NewUserHandler(userSvc)
 
 	// ── 7.5 [Step 4] Post module wiring ───────────────────────────────────────
@@ -168,18 +171,20 @@ func main() {
 	// enforce the OSS whitelist on cover_url + each step's image_urls.
 	postRepo := repository.NewPostRepository(db)
 	feedCache := cache.NewFeedCache(rdb, cfg.Cache.FeedCacheTTL, cfg.Cache.PVDedupTTL)
+	// likeCache lives next to feedCache so PostService / SearchService can
+	// enrich list responses with the viewer's liked_by_me state.
+	likeCache := cache.NewLikeCache(rdb, cfg.Cache.LikeStateTTL)
 	// [Step 7] AuthorAssembler is shared by PostService (feed / author-page)
 	// and SearchService — single source of truth for author-snapshot
 	// assembly.
 	authorAssembler := service.NewAuthorAssembler(userRepo)
-	postSvc := service.NewPostService(postRepo, userRepo, feedCache, writeMarker, bus, authorAssembler, cfg.OSS, cfg.Cache)
+	postSvc := service.NewPostService(postRepo, userRepo, feedCache, likeCache, writeMarker, bus, authorAssembler, cfg.OSS, cfg.Cache)
 	postHandler := handler.NewPostHandler(postSvc)
 	feedHandler := handler.NewFeedHandler(postSvc)
 	log.Info("post module wired")
 
 	// ── 7.6 [Step 5] Like module + Consumer wiring ────────────────────────────
 	likeRepo := repository.NewLikeRepository(db)
-	likeCache := cache.NewLikeCache(rdb, cfg.Cache.LikeStateTTL)
 	likeSvc := service.NewLikeService(postRepo, likeCache, bus)
 	likeHandler := handler.NewLikeHandler(likeSvc)
 	log.Info("like module wired")
@@ -219,12 +224,12 @@ func main() {
 
 	// ── 7.7 [Step 7] Search module wiring ─────────────────────────────────────
 	searchRepo := repository.NewSearchRepository(db)
-	searchSvc := service.NewSearchService(searchRepo, authorAssembler, cfg.Search)
+	searchSvc := service.NewSearchService(searchRepo, authorAssembler, likeCache, cfg.Search)
 	searchHandler := handler.NewSearchHandler(searchSvc)
 	log.Info("search module wired")
 
 	// ── 7.8 [Step 8] Follow module wiring ─────────────────────────────────────
-	followRepo := repository.NewFollowRepository(db)
+	// followRepo is constructed up in stage 7 so UserService can use it; reuse here.
 	followSvc := service.NewFollowService(followRepo, userRepo, bus, writeMarker, cfg.Follow)
 	followHandler := handler.NewFollowHandler(followSvc)
 	log.Info("follow module wired")
@@ -429,10 +434,14 @@ func setupRouter(
 	}
 
 	// [Step 3+4+8] User routes — mixed visibility.
+	// OptionalAuth on the public GETs surfaces viewer-specific fields
+	// (users/:id → is_following; users/:id/posts → liked_by_me) when a
+	// valid Bearer token is attached; anonymous callers still get a 200
+	// with those fields defaulted to false.
 	userGroup := v1.Group("/users")
 	{
-		userGroup.GET("/:id", userHandler.GetPublicProfile)
-		userGroup.GET("/:id/posts", feedHandler.ListByUser)
+		userGroup.GET("/:id", middleware.OptionalAuth(tokenVerifier), userHandler.GetPublicProfile)
+		userGroup.GET("/:id/posts", middleware.OptionalAuth(tokenVerifier), feedHandler.ListByUser)
 
 		// [Step 8] Follow resource on a user.
 		userGroup.POST("/:id/follow", middleware.Auth(tokenVerifier), followHandler.Follow)
@@ -483,16 +492,17 @@ func setupRouter(
 		)
 	}
 
-	// [Step 4] Feed routes — public.
+	// [Step 4] Feed routes — public with optional auth (liked_by_me).
 	feedGroup := v1.Group("/feed")
 	{
-		feedGroup.GET("", feedHandler.ListFeed)
+		feedGroup.GET("", middleware.OptionalAuth(tokenVerifier), feedHandler.ListFeed)
 	}
 
-	// [Step 7] Search route — public.
+	// [Step 7] Search route — public with optional auth (liked_by_me).
 	searchGroup := v1.Group("/search")
 	{
 		searchGroup.GET("",
+			middleware.OptionalAuth(tokenVerifier),
 			middleware.RateLimit(middleware.RateLimitConfig{
 				RDB:     rdb,
 				KeyFunc: middleware.PerIPKey("limit:search"),

@@ -31,9 +31,12 @@ import (
 	"errors"
 	"fmt"
 
+	"cooking-platform/internal/cache"
 	"cooking-platform/internal/model"
 	"cooking-platform/internal/model/dto"
 	"cooking-platform/internal/repository"
+
+	"go.uber.org/zap"
 )
 
 // AuthorAssembler loads author snapshots and assembles post list DTOs.
@@ -130,6 +133,35 @@ func BuildAuthorBrief(authorID int64, u *model.User) dto.PostAuthorBrief {
 	return dto.PostAuthorBrief{
 		ID:       authorID,
 		Nickname: "（用户已注销）",
+	}
+}
+
+// AttachLikedByMe patches each item's LikedByMe flag based on a batch
+// SISMEMBER probe against the LikeCache. No-op for viewerID==0 (anonymous
+// caller) or an empty slice. A Redis failure degrades to LikedByMe=false on
+// every item — logged so we notice but never propagated, because losing
+// the viewer-specific badge is far less bad than 500ing the whole feed.
+func AttachLikedByMe(ctx context.Context, likeCache *cache.LikeCache, viewerID int64, items []dto.PostListItem) {
+	if viewerID == 0 || len(items) == 0 || likeCache == nil {
+		return
+	}
+	ids := make([]int64, 0, len(items))
+	for _, it := range items {
+		ids = append(ids, it.ID)
+	}
+	likedMap, err := likeCache.BatchHasLiked(ctx, viewerID, ids)
+	if err != nil {
+		zap.L().Warn("batch has-liked failed; liked_by_me degraded to false",
+			zap.Int64("viewer_id", viewerID),
+			zap.Int("page_size", len(items)),
+			zap.Error(err),
+		)
+		return
+	}
+	for i := range items {
+		if likedMap[items[i].ID] {
+			items[i].LikedByMe = true
+		}
 	}
 }
 

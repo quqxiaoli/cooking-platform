@@ -66,6 +66,9 @@ type LoginResp struct {
 // UserPublicResp is the public view of a user — no phone number, no email,
 // no anything PII. Returned by GET /api/v1/users/:id and embedded in feed/post
 // responses (Step 4+).
+//
+// IsFollowing reflects whether the authenticated caller (if any) currently
+// follows this user. Anonymous callers and self-views always see false.
 type UserPublicResp struct {
 	ID             int64  `json:"id"`
 	Nickname       string `json:"nickname"`
@@ -75,7 +78,8 @@ type UserPublicResp struct {
 	TotalLikes     uint32 `json:"total_likes"`
 	FollowerCount  uint32 `json:"follower_count"`
 	FollowingCount uint32 `json:"following_count"`
-	CreatedAt      int64  `json:"created_at"` // UnixMilli
+	CreatedAt      int64  `json:"created_at"`   // UnixMilli
+	IsFollowing    bool   `json:"is_following"` // viewer follows this user
 }
 
 // UserPrivateResp is the self-view: includes the masked phone number.

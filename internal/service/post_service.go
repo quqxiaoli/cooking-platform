@@ -49,6 +49,7 @@ type PostService struct {
 	postRepo    repository.PostRepository
 	userRepo    repository.UserRepository
 	feedCache   *cache.FeedCache
+	likeCache   *cache.LikeCache   // viewer-aware liked_by_me on list responses
 	writeMarker *cache.WriteMarker // [Fix #1] read-after-write force-master hint
 	bus         event.EventPublisher
 	assembler   *AuthorAssembler
@@ -67,6 +68,7 @@ func NewPostService(
 	postRepo repository.PostRepository,
 	userRepo repository.UserRepository,
 	feedCache *cache.FeedCache,
+	likeCache *cache.LikeCache,
 	writeMarker *cache.WriteMarker,
 	bus event.EventPublisher,
 	assembler *AuthorAssembler,
@@ -77,6 +79,7 @@ func NewPostService(
 		postRepo:    postRepo,
 		userRepo:    userRepo,
 		feedCache:   feedCache,
+		likeCache:   likeCache,
 		writeMarker: writeMarker,
 		bus:         bus,
 		assembler:   assembler,
@@ -237,7 +240,13 @@ func (s *PostService) GetDetail(ctx context.Context, postID, viewerID int64, vie
 
 // ListFeed returns one page of the home feed (or scene-filtered feed),
 // using the version-keyed cache before falling back to MySQL.
-func (s *PostService) ListFeed(ctx context.Context, q dto.FeedQuery) (*dto.FeedResp, error) {
+//
+// The cache stores the viewer-agnostic page (LikedByMe always false on
+// serialised entries); AttachLikedByMe enriches the response after every
+// cache hit and after every miss-then-fetch path, so the cache stays
+// shareable across users while authenticated callers still see their own
+// like state.
+func (s *PostService) ListFeed(ctx context.Context, viewerID int64, q dto.FeedQuery) (*dto.FeedResp, error) {
 	size := normaliseSize(q.Size)
 
 	cursorTime, err := parseCursor(q.Cursor)
@@ -260,6 +269,7 @@ func (s *PostService) ListFeed(ctx context.Context, q dto.FeedQuery) (*dto.FeedR
 		} else if cached != nil {
 			var resp dto.FeedResp
 			if uerr := json.Unmarshal(cached, &resp); uerr == nil {
+				AttachLikedByMe(ctx, s.likeCache, viewerID, resp.Posts)
 				return &resp, nil
 			}
 			zap.L().Warn("feed cache unmarshal failed; refetching from db",
@@ -279,6 +289,8 @@ func (s *PostService) ListFeed(ctx context.Context, q dto.FeedQuery) (*dto.FeedR
 		return nil, err
 	}
 
+	// Cache the viewer-agnostic page (LikedByMe still false here) before
+	// per-viewer enrichment so the entry stays shareable across users.
 	if verErr == nil {
 		if data, jerr := json.Marshal(resp); jerr == nil {
 			if cerr := s.feedCache.SetFeed(ctx, scene, ver, cursorTime, data, s.cacheCfg.FeedCacheTTL); cerr != nil {
@@ -291,13 +303,14 @@ func (s *PostService) ListFeed(ctx context.Context, q dto.FeedQuery) (*dto.FeedR
 		}
 	}
 
+	AttachLikedByMe(ctx, s.likeCache, viewerID, resp.Posts)
 	return resp, nil
 }
 
 // ── ListByUser ──────────────────────────────────────────────────────────────
 
 // ListByUser returns one page of an author's public posts.
-func (s *PostService) ListByUser(ctx context.Context, authorID int64, cursor string, size int) (*dto.FeedResp, error) {
+func (s *PostService) ListByUser(ctx context.Context, viewerID, authorID int64, cursor string, size int) (*dto.FeedResp, error) {
 	size = normaliseSize(size)
 
 	cursorTime, err := parseCursor(cursor)
@@ -331,6 +344,8 @@ func (s *PostService) ListByUser(ctx context.Context, authorID int64, cursor str
 	for _, p := range posts {
 		items = append(items, BuildListItem(p, author))
 	}
+
+	AttachLikedByMe(ctx, s.likeCache, viewerID, items)
 
 	return &dto.FeedResp{
 		Posts:      items,

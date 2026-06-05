@@ -109,6 +109,11 @@ type PostAuthorBrief struct {
 // PostListItem is one row in any feed/list response (homepage feed,
 // scene-filtered feed, author-page feed). Excludes Content because feed
 // cards render only title + cover.
+//
+// LikedByMe reflects whether the authenticated caller (if any) has liked
+// this post. Anonymous callers always see false. Patched per-page by
+// AttachLikedByMe after the base list is built so the feed cache stays
+// viewer-agnostic.
 type PostListItem struct {
 	ID        int64           `json:"id"`
 	Title     string          `json:"title"`
@@ -118,7 +123,8 @@ type PostListItem struct {
 	LikeCount uint32          `json:"like_count"`
 	ViewCount uint32          `json:"view_count"`
 	Author    PostAuthorBrief `json:"author"`
-	CreatedAt int64           `json:"created_at"` // UnixMilli
+	CreatedAt int64           `json:"created_at"`  // UnixMilli
+	LikedByMe bool            `json:"liked_by_me"` // viewer has liked this post
 }
 
 // PostStepResp is one step in PostDetailResp.Steps. Mirrors PostStepReq
