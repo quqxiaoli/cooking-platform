@@ -42,6 +42,15 @@ var ConsumerQueueDepth *prometheus.GaugeVec
 // Populated by RedisHook registered on the go-redis client in main().
 var RedisCommandDuration *prometheus.HistogramVec
 
+// ── P0: RabbitMQ DLX ([Fix #3]) ──────────────────────────────────────────────
+
+// DLXQueueDepth tracks the number of unacked messages sitting in the
+// RabbitMQ dead-letter queue ("cooking.events.dlx.queue"). Sampled by the
+// DLX monitor goroutine on a 30s ticker. Any non-zero value means a
+// consumer rejected at least one message — operators must drain the queue
+// before it grows unbounded. Drives the Alertmanager DLXNotEmpty alert.
+var DLXQueueDepth prometheus.Gauge
+
 // Init creates and registers all application metrics with the default
 // Prometheus registry. It must be called exactly once from main() before
 // any metric observation occurs.
@@ -95,6 +104,13 @@ func Init(namespace string) {
 		},
 		[]string{"command", "status"},
 	)
+	DLXQueueDepth = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "rabbitmq_dlx_queue_depth",
+			Help:      "Number of unacknowledged messages currently sitting in the RabbitMQ dead-letter queue.",
+		},
+	)
 
 	prometheus.MustRegister(
 		HTTPRequestsTotal,
@@ -102,5 +118,6 @@ func Init(namespace string) {
 		ConsumerProcessedTotal,
 		ConsumerQueueDepth,
 		RedisCommandDuration,
+		DLXQueueDepth,
 	)
 }

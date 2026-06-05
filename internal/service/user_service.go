@@ -41,14 +41,15 @@ import (
 
 // UserService is the entry point for all user-related business operations.
 type UserService struct {
-	repo      repository.UserRepository
-	userCache *cache.UserCache
-	jwtMgr    *jwt.Manager
-	smsSender sms.Sender
-	smsCfg    config.SMSConfig
-	ossCfg    config.OSSConfig    // [Step 9] for avatar_url whitelist
-	encCfg    config.EncryptionConfig // [Step 11] phone AES-GCM key + pepper
-	rlCfg     config.RatelimitConfig
+	repo        repository.UserRepository
+	userCache   *cache.UserCache
+	writeMarker *cache.WriteMarker // [Fix #1] read-after-write force-master hint
+	jwtMgr      *jwt.Manager
+	smsSender   sms.Sender
+	smsCfg      config.SMSConfig
+	ossCfg      config.OSSConfig        // [Step 9] for avatar_url whitelist
+	encCfg      config.EncryptionConfig // [Step 11] phone AES-GCM key + pepper
+	rlCfg       config.RatelimitConfig
 }
 
 // NewUserService wires the service with its dependencies.
@@ -62,6 +63,7 @@ type UserService struct {
 func NewUserService(
 	repo repository.UserRepository,
 	userCache *cache.UserCache,
+	writeMarker *cache.WriteMarker,
 	jwtMgr *jwt.Manager,
 	smsSender sms.Sender,
 	smsCfg config.SMSConfig,
@@ -70,14 +72,15 @@ func NewUserService(
 	rlCfg config.RatelimitConfig,
 ) *UserService {
 	return &UserService{
-		repo:      repo,
-		userCache: userCache,
-		jwtMgr:    jwtMgr,
-		smsSender: smsSender,
-		smsCfg:    smsCfg,
-		ossCfg:    ossCfg,
-		encCfg:    encCfg,
-		rlCfg:     rlCfg,
+		repo:        repo,
+		userCache:   userCache,
+		writeMarker: writeMarker,
+		jwtMgr:      jwtMgr,
+		smsSender:   smsSender,
+		smsCfg:      smsCfg,
+		ossCfg:      ossCfg,
+		encCfg:      encCfg,
+		rlCfg:       rlCfg,
 	}
 }
 
@@ -258,6 +261,11 @@ func (s *UserService) Logout(ctx context.Context, accessToken string) error {
 
 // GetMyProfile returns the authenticated user's private profile.
 func (s *UserService) GetMyProfile(ctx context.Context, userID int64) (*dto.UserPrivateResp, error) {
+	// [Fix #1] If the user just updated their profile, route to master so the
+	// /users/me response reflects the change instead of a stale slave copy.
+	if s.writeMarker.Has(ctx, userID) {
+		ctx = repository.WithForceMaster(ctx)
+	}
 	user, err := s.repo.FindByID(ctx, userID)
 	if err != nil {
 		if errors.Is(err, repository.ErrUserNotFound) {
@@ -334,6 +342,10 @@ func (s *UserService) UpdateProfile(ctx context.Context, userID int64, req dto.U
 	if err := s.repo.UpdateProfile(ctx, userID, updates); err != nil {
 		return fmt.Errorf("update profile: %w", err)
 	}
+
+	// [Fix #1] Stamp the write marker so the next /users/me read routes to
+	// the master and never shows a stale slave copy of the profile.
+	s.writeMarker.Mark(ctx, userID)
 
 	if err := s.userCache.DeleteUserInfo(ctx, userID); err != nil {
 		zap.L().Warn("invalidate user cache failed",

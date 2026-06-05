@@ -1,0 +1,96 @@
+# deploy/prometheus/alerts.yml — Alertmanager rules. ([Fix #6])
+#
+# Five must-have alerts derived from the project SLO:
+#   1. High5xxRate          — user-visible reliability regression
+#   2. DLXNotEmpty          — message graveyard not draining ([Fix #3])
+#   3. ConsumerBacklog      — in-memory channel backing up
+#   4. MySQLPoolNearExhaustion — DB connection pool ~full (matches CLAUDE.md §8.3)
+#   5. HTTPSCertExpiringSoon— cert renewal failed silently
+#
+# All rules use the "cooking" Prometheus namespace prefix that matches
+# pkg/metrics.Init(cfg.Metrics.Namespace).
+
+groups:
+  - name: cooking-platform-availability
+    interval: 30s
+    rules:
+      # ── 1. 5xx error rate exceeds 1% for 5 minutes ────────────────────────
+      # Threshold deliberately matches the CLAUDE.md §8.3 触发型维护 table —
+      # operators see the same "5xx > 1%" both in the playbook and in the page.
+      - alert: High5xxRate
+        expr: |
+          (
+            sum(rate(cooking_http_requests_total{status="5xx"}[5m]))
+            /
+            sum(rate(cooking_http_requests_total[5m]))
+          ) > 0.01
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "API 5xx rate > 1% for 5m"
+          description: "{{ $value | humanizePercentage }} of requests returned 5xx in the last 5m. Check app logs."
+
+      # ── 2. DLX queue not empty (Fix #3) ───────────────────────────────────
+      # Any non-zero value persisting >5m is a real graveyard. A single rapid
+      # bad-payload event will resolve before for: 5m fires, which is
+      # intentional — we don't want to page on transient hiccups.
+      - alert: DLXNotEmpty
+        expr: cooking_rabbitmq_dlx_queue_depth > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RabbitMQ DLX has {{ $value }} undelivered messages"
+          description: "Messages have been Nack'd into cooking.events.dlx.queue for 5m. Inspect via `docker exec cooking-rabbitmq-prod rabbitmqctl list_queues name messages` and decide whether to replay or purge."
+
+      # ── 3. Consumer in-memory queue backing up ────────────────────────────
+      # Threshold matches CLAUDE.md §8.3: "Consumer backlog 持续 > 100".
+      - alert: ConsumerBacklog
+        expr: max(cooking_consumer_queue_depth) by (consumer) > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Consumer {{ $labels.consumer }} backlog > 100 for 10m"
+          description: "Channel depth has been > 100 for 10m. Check whether the consumer is processing slowly or whether RabbitMQ is delivering faster than batch_size/flush_interval can handle."
+
+      # ── 4. MySQL connection pool near exhaustion ──────────────────────────
+      # Matches CLAUDE.md §8.3 触发型维护: "MySQL 连接池接近耗尽".
+      # pkg/metrics/mysql_collector.go exposes pool_inuse_connections and
+      # pool_open_connections via a pull-model collector. >90% utilization for
+      # 5m means new requests are about to start queueing on conn acquisition.
+      #
+      # NOTE: slave replication lag is intentionally NOT alerted on here
+      # because pkg/metrics only ships pool stats today — adding a
+      # seconds_behind_source gauge is debt #1 territory (Loki/observability
+      # buildout) and out of scope for this fix bundle.
+      - alert: MySQLPoolNearExhaustion
+        expr: |
+          (
+            cooking_mysql_pool_inuse_connections
+            /
+            cooking_mysql_pool_open_connections
+          ) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MySQL pool >90% in-use for 5m ({{ $labels.instance }})"
+          description: "{{ $value | humanizePercentage }} of open connections are in-use. Run `SHOW PROCESSLIST` on the master and check for slow queries or app-side connection leaks. See CLAUDE.md §8.3."
+
+  - name: cooking-platform-certs
+    interval: 1m
+    rules:
+      # ── 5. HTTPS cert renewal failed silently ─────────────────────────────
+      # blackbox_exporter probes mellowck.com and exposes the leaf cert's
+      # expiry as a unix-seconds gauge. 14 days = 2x the certbot retry
+      # window — gives a 2-week ops cushion before browser warnings fire.
+      - alert: HTTPSCertExpiringSoon
+        expr: probe_ssl_earliest_cert_expiry - time() < 14 * 24 * 3600
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: "HTTPS cert for {{ $labels.instance }} expires in < 14d"
+          description: "Cert renewal via certbot may have failed. Run `certbot renew --dry-run` on the host and inspect /var/log/letsencrypt/."

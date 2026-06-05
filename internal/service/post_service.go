@@ -46,36 +46,42 @@ import (
 
 // PostService is the business orchestrator for the content module.
 type PostService struct {
-	postRepo  repository.PostRepository
-	userRepo  repository.UserRepository
-	feedCache *cache.FeedCache
-	bus       event.EventPublisher
-	assembler *AuthorAssembler
-	ossCfg    config.OSSConfig   // [Step 9] for image URL whitelist
-	cacheCfg  config.CacheConfig // [Step 13] feed page TTL (was cache.FeedCacheTTL constant)
+	postRepo    repository.PostRepository
+	userRepo    repository.UserRepository
+	feedCache   *cache.FeedCache
+	writeMarker *cache.WriteMarker // [Fix #1] read-after-write force-master hint
+	bus         event.EventPublisher
+	assembler   *AuthorAssembler
+	ossCfg      config.OSSConfig   // [Step 9] for image URL whitelist
+	cacheCfg    config.CacheConfig // [Step 13] feed page TTL (was cache.FeedCacheTTL constant)
 }
 
 // NewPostService constructs a PostService.
 //
 // [Step 9] ossCfg drives the cover_url + step image_urls whitelist check.
 // [Step 13] cacheCfg.FeedCacheTTL replaces the removed cache.FeedCacheTTL constant.
+// [Fix #1] writeMarker is used to force master reads briefly after the author
+// writes, so the author's own feed never appears to "lose" their new post due
+// to slave replication lag.
 func NewPostService(
 	postRepo repository.PostRepository,
 	userRepo repository.UserRepository,
 	feedCache *cache.FeedCache,
+	writeMarker *cache.WriteMarker,
 	bus event.EventPublisher,
 	assembler *AuthorAssembler,
 	ossCfg config.OSSConfig,
 	cacheCfg config.CacheConfig,
 ) *PostService {
 	return &PostService{
-		postRepo:  postRepo,
-		userRepo:  userRepo,
-		feedCache: feedCache,
-		bus:       bus,
-		assembler: assembler,
-		ossCfg:    ossCfg,
-		cacheCfg:  cacheCfg,
+		postRepo:    postRepo,
+		userRepo:    userRepo,
+		feedCache:   feedCache,
+		writeMarker: writeMarker,
+		bus:         bus,
+		assembler:   assembler,
+		ossCfg:      ossCfg,
+		cacheCfg:    cacheCfg,
 	}
 }
 
@@ -161,6 +167,11 @@ func (s *PostService) Create(ctx context.Context, userID int64, req dto.CreatePo
 			return nil, fmt.Errorf("create post with steps: %w", err)
 		}
 	}
+
+	// [Fix #1] Stamp the author's write marker so any read in the next ~5s
+	// (typically the client refreshing its own author page) is routed to the
+	// master and never sees a slave-lag "post vanished" gap.
+	s.writeMarker.Mark(ctx, userID)
 
 	// Async side effects — best-effort, never fail the user-visible op.
 	// publishPostEvent → CountConsumer increments users.post_count.
@@ -292,6 +303,14 @@ func (s *PostService) ListByUser(ctx context.Context, authorID int64, cursor str
 	cursorTime, err := parseCursor(cursor)
 	if err != nil {
 		return nil, errcode.ErrCursorInvalid
+	}
+
+	// [Fix #1] If authorID has a fresh write marker, force this read to the
+	// master. The check is a single Redis EXISTS — cheap enough to do per
+	// request, and the marker auto-expires in 5s so we don't permanently
+	// degrade read-write splitting.
+	if s.writeMarker.Has(ctx, authorID) {
+		ctx = repository.WithForceMaster(ctx)
 	}
 
 	posts, err := s.postRepo.ListByUser(ctx, authorID, false, cursorTime, size)

@@ -97,22 +97,130 @@ services:
     networks:
       - cooking-prod-net
 
-  # ── Redis 7.2 ─────────────────────────────────────────────────────────────
-  redis:
+  # ── Redis 7.2 — Sentinel single-host topology ([Fix #5]) ──────────────────
+  # 1 master + 1 slave + 3 sentinel (quorum=2) all on the same physical host.
+  # This gives us automatic failover (slave promoted within ~5s on master
+  # crash) without the operational cost of a multi-host cluster — adequate
+  # for a single-VM deployment. See deploy/redis/sentinel*.conf.tpl for the
+  # sentinel side; app side switches via redis.mode=sentinel in
+  # configs/config.prod.yaml.
+  redis-master:
     image: redis:7.2-alpine
-    container_name: cooking-redis-prod
+    container_name: cooking-redis-master-prod
     restart: always
-    # Production REQUIRES a password — startup fails fast if REDIS_PASSWORD
-    # is empty (config.prod.yaml then mismatches the broker → app aborts).
-    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required}", "--save", "60", "1000", "--appendonly", "yes"]
+    # masterauth lets the slave authenticate when re-syncing after failover.
+    command:
+      - "redis-server"
+      - "--requirepass"
+      - "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"
+      - "--masterauth"
+      - "${REDIS_PASSWORD}"
+      - "--save"
+      - "60"
+      - "1000"
+      - "--appendonly"
+      - "yes"
     volumes:
-      - redis-prod-data:/data
+      - redis-master-prod-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
       timeout: 3s
       retries: 5
       start_period: 10s
+    networks:
+      - cooking-prod-net
+
+  redis-slave:
+    image: redis:7.2-alpine
+    container_name: cooking-redis-slave-prod
+    restart: always
+    command:
+      - "redis-server"
+      - "--requirepass"
+      - "${REDIS_PASSWORD}"
+      - "--masterauth"
+      - "${REDIS_PASSWORD}"
+      - "--replicaof"
+      - "redis-master"
+      - "6379"
+      - "--appendonly"
+      - "yes"
+    volumes:
+      - redis-slave-prod-data:/data
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      - cooking-prod-net
+
+  # 3 sentinel processes — quorum=2 means any single sentinel crash will not
+  # cause spurious failover. envsubst at startup injects REDIS_PASSWORD into
+  # the rendered conf (sentinel.conf doesn't support env interpolation natively),
+  # then sentinel runs with the writable copy (it rewrites the file at runtime).
+  redis-sentinel1:
+    image: redis:7.2-alpine
+    container_name: cooking-redis-sentinel1-prod
+    restart: always
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    entrypoint:
+      - "sh"
+      - "-c"
+      - "apk add --no-cache gettext >/dev/null 2>&1 || true; envsubst < /etc/redis/sentinel.conf.tpl > /tmp/sentinel.conf && exec redis-server /tmp/sentinel.conf --sentinel"
+    volumes:
+      - ./deploy/redis/sentinel1.conf.tpl:/etc/redis/sentinel.conf.tpl:ro
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-slave:
+        condition: service_healthy
+    networks:
+      - cooking-prod-net
+
+  redis-sentinel2:
+    image: redis:7.2-alpine
+    container_name: cooking-redis-sentinel2-prod
+    restart: always
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    entrypoint:
+      - "sh"
+      - "-c"
+      - "apk add --no-cache gettext >/dev/null 2>&1 || true; envsubst < /etc/redis/sentinel.conf.tpl > /tmp/sentinel.conf && exec redis-server /tmp/sentinel.conf --sentinel"
+    volumes:
+      - ./deploy/redis/sentinel2.conf.tpl:/etc/redis/sentinel.conf.tpl:ro
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-slave:
+        condition: service_healthy
+    networks:
+      - cooking-prod-net
+
+  redis-sentinel3:
+    image: redis:7.2-alpine
+    container_name: cooking-redis-sentinel3-prod
+    restart: always
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    entrypoint:
+      - "sh"
+      - "-c"
+      - "apk add --no-cache gettext >/dev/null 2>&1 || true; envsubst < /etc/redis/sentinel.conf.tpl > /tmp/sentinel.conf && exec redis-server /tmp/sentinel.conf --sentinel"
+    volumes:
+      - ./deploy/redis/sentinel3.conf.tpl:/etc/redis/sentinel.conf.tpl:ro
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-slave:
+        condition: service_healthy
     networks:
       - cooking-prod-net
 
@@ -169,7 +277,9 @@ services:
         condition: service_healthy
       mysql-slave:
         condition: service_healthy
-      redis:
+      redis-master:
+        condition: service_healthy
+      redis-slave:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
@@ -208,7 +318,9 @@ services:
         condition: service_healthy
       mysql-slave:
         condition: service_healthy
-      redis:
+      redis-master:
+        condition: service_healthy
+      redis-slave:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
@@ -256,6 +368,7 @@ services:
     restart: always
     volumes:
       - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus-prod-data:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
@@ -267,6 +380,66 @@ services:
         condition: service_healthy
       app2:
         condition: service_healthy
+    networks:
+      - cooking-prod-net
+
+  # ── Alertmanager ([Fix #6]) ──────────────────────────────────────────────
+  # Receives alerts from Prometheus, groups + dedups, emails ops.
+  # SMTP credentials come from .env.prod (ALERT_SMTP_* / ALERT_EMAIL_TO);
+  # alertmanager.yml uses ${VAR} interpolation that docker-compose substitutes
+  # at parse time, so the file lands inside the container with real values.
+  # One-shot init container that renders alertmanager.yml.tpl -> shared
+  # volume with env vars substituted. Needed because prom/alertmanager is
+  # busybox-based (no apk, no envsubst) so we cannot do the substitution
+  # inside the alertmanager container itself.
+  alertmanager-config:
+    image: alpine:3.20
+    container_name: cooking-alertmanager-config-prod
+    restart: "no"
+    environment:
+      ALERT_SMTP_SMARTHOST: ${ALERT_SMTP_SMARTHOST:?ALERT_SMTP_SMARTHOST is required}
+      ALERT_SMTP_FROM: ${ALERT_SMTP_FROM:?ALERT_SMTP_FROM is required}
+      ALERT_SMTP_USERNAME: ${ALERT_SMTP_USERNAME:?ALERT_SMTP_USERNAME is required}
+      ALERT_SMTP_PASSWORD: ${ALERT_SMTP_PASSWORD:?ALERT_SMTP_PASSWORD is required}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:?ALERT_EMAIL_TO is required}
+    entrypoint:
+      - "sh"
+      - "-c"
+      - "apk add --no-cache gettext >/dev/null && envsubst < /src/alertmanager.yml > /dst/alertmanager.yml && echo rendered alertmanager.yml"
+    volumes:
+      - ./deploy/alertmanager:/src:ro
+      - alertmanager-config-prod:/dst
+    networks:
+      - cooking-prod-net
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: cooking-alertmanager-prod
+    restart: always
+    depends_on:
+      alertmanager-config:
+        condition: service_completed_successfully
+    command:
+      - "--config.file=/etc/alertmanager-rendered/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    volumes:
+      - alertmanager-config-prod:/etc/alertmanager-rendered:ro
+      - alertmanager-prod-data:/alertmanager
+    networks:
+      - cooking-prod-net
+
+  # ── blackbox_exporter ([Fix #6]) ─────────────────────────────────────────
+  # External probe target for HTTPSCertExpiringSoon. Prometheus scrapes
+  # blackbox-exporter:9115/probe?module=https_cert_check&target=https://mellowck.com
+  # — see deploy/prometheus/prometheus.yml job blackbox-https.
+  blackbox-exporter:
+    image: prom/blackbox-exporter:v0.25.0
+    container_name: cooking-blackbox-exporter-prod
+    restart: always
+    volumes:
+      - ./deploy/blackbox/blackbox.yml:/config/blackbox.yml:ro
+    command:
+      - "--config.file=/config/blackbox.yml"
     networks:
       - cooking-prod-net
 
@@ -299,13 +472,19 @@ volumes:
     driver: local
   mysql-slave-prod-data:
     driver: local
-  redis-prod-data:
+  redis-master-prod-data:
+    driver: local
+  redis-slave-prod-data:
     driver: local
   rabbitmq-prod-data:
     driver: local
   prometheus-prod-data:
     driver: local
   grafana-prod-data:
+    driver: local
+  alertmanager-prod-data:
+    driver: local
+  alertmanager-config-prod:
     driver: local
 
 networks:

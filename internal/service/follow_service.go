@@ -54,6 +54,7 @@ import (
 	"strconv"
 	"time"
 
+	"cooking-platform/internal/cache"
 	"cooking-platform/internal/event"
 	"cooking-platform/internal/model/dto"
 	"cooking-platform/internal/repository"
@@ -73,6 +74,7 @@ type FollowService struct {
 	followRepo      repository.FollowRepository
 	userRepo        repository.UserRepository
 	bus             event.EventPublisher
+	writeMarker     *cache.WriteMarker // [Fix #1] read-after-write force-master hint
 	maxFollowing    int
 	defaultListSize int
 	maxListSize     int
@@ -92,12 +94,14 @@ func NewFollowService(
 	followRepo repository.FollowRepository,
 	userRepo repository.UserRepository,
 	bus event.EventPublisher,
+	writeMarker *cache.WriteMarker,
 	cfg config.FollowConfig,
 ) *FollowService {
 	return &FollowService{
 		followRepo:      followRepo,
 		userRepo:        userRepo,
 		bus:             bus,
+		writeMarker:     writeMarker,
 		maxFollowing:    cfg.MaxFollowing,
 		defaultListSize: cfg.DefaultListSize,
 		maxListSize:     cfg.MaxListSize,
@@ -160,6 +164,11 @@ func (s *FollowService) Follow(ctx context.Context, followerID, targetID int64) 
 		return nil, fmt.Errorf("follow: create: %w", err)
 	}
 	if inserted {
+		// [Fix #1] Mark both ends: the follower's own ListFollowing and the
+		// target's ListFollowers should both reflect this new edge on the next
+		// read, regardless of slave lag.
+		s.writeMarker.Mark(ctx, followerID)
+		s.writeMarker.Mark(ctx, targetID)
 		s.publishFollowEvent(ctx, followerID, targetID)
 	}
 
@@ -183,6 +192,11 @@ func (s *FollowService) Unfollow(ctx context.Context, followerID, targetID int64
 		return nil, errcode.ErrFollowNotFound
 	}
 
+	// [Fix #1] Same dual-mark as Follow — both ends need their next read to
+	// see the deletion through master.
+	s.writeMarker.Mark(ctx, followerID)
+	s.writeMarker.Mark(ctx, targetID)
+
 	s.publishUnfollowEvent(ctx, followerID, targetID)
 	return &dto.FollowActionResp{Following: false}, nil
 }
@@ -201,6 +215,11 @@ func (s *FollowService) ListFollowers(ctx context.Context, targetID int64, curso
 	}
 	size = s.clampFollowListSize(size)
 
+	// [Fix #1] Route to master if there was a recent write touching targetID.
+	if s.writeMarker.Has(ctx, targetID) {
+		ctx = repository.WithForceMaster(ctx)
+	}
+
 	// Fetch size+1 to detect has_more without a separate COUNT query —
 	// the same trick the feed module uses.
 	rows, err := s.followRepo.ListFollowers(ctx, targetID, cursorFollowID, size+1)
@@ -218,6 +237,11 @@ func (s *FollowService) ListFollowing(ctx context.Context, targetID int64, curso
 		return nil, err
 	}
 	size = s.clampFollowListSize(size)
+
+	// [Fix #1] Route to master if there was a recent write touching targetID.
+	if s.writeMarker.Has(ctx, targetID) {
+		ctx = repository.WithForceMaster(ctx)
+	}
 
 	rows, err := s.followRepo.ListFollowing(ctx, targetID, cursorFollowID, size+1)
 	if err != nil {

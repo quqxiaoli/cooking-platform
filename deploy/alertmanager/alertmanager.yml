@@ -1,0 +1,39 @@
+# deploy/alertmanager/alertmanager.yml — Alertmanager routing config. ([Fix #6])
+#
+# Single-receiver setup: every firing alert lands in the operator's mailbox.
+# More routes (Slack, PagerDuty, severity-based on-call) can be added later
+# without changing the rule files.
+#
+# SMTP credentials come from environment variables baked in via
+# docker-compose.prod.yml — never commit real credentials here.
+
+global:
+  resolve_timeout: 5m
+  # Sender address shown in the From: header. SMTP creds via env.
+  smtp_smarthost: "${ALERT_SMTP_SMARTHOST}"
+  smtp_from: "${ALERT_SMTP_FROM}"
+  smtp_auth_username: "${ALERT_SMTP_USERNAME}"
+  smtp_auth_password: "${ALERT_SMTP_PASSWORD}"
+  smtp_require_tls: true
+
+route:
+  # Group identical alerts (same alertname + severity) into one notification
+  # to avoid email flooding when, e.g., both app1 and app2 5xx-rate trips at once.
+  group_by: ["alertname", "severity"]
+  group_wait: 30s         # buffer first notification by 30s to coalesce bursts
+  group_interval: 5m      # then at most one notification per group per 5m
+  repeat_interval: 12h    # re-send a still-firing alert at most twice a day
+  receiver: ops-email
+
+receivers:
+  - name: ops-email
+    email_configs:
+      - to: "${ALERT_EMAIL_TO}"
+        send_resolved: true   # also email when the alert clears
+
+inhibit_rules:
+  # If we're paging on overall 5xx, suppress redundant lower-severity alerts
+  # for the same instance — operators only need one page per incident.
+  - source_matchers: ['severity = "critical"']
+    target_matchers: ['severity = "warning"']
+    equal: ["alertname", "instance"]

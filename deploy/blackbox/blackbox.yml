@@ -1,0 +1,17 @@
+# deploy/blackbox/blackbox.yml — blackbox_exporter modules. ([Fix #6])
+#
+# Currently used only for HTTPS cert-expiry probing
+# (HTTPSCertExpiringSoon alert in deploy/prometheus/alerts.yml).
+# Add more modules here when probing other endpoints (TCP, ICMP, etc.).
+
+modules:
+  https_cert_check:
+    prober: http
+    timeout: 10s
+    http:
+      preferred_ip_protocol: ip4
+      # We only care about cert expiry; tls_config.insecure_skip_verify
+      # stays false so a broken chain ALSO surfaces as probe_success=0.
+      method: HEAD
+      fail_if_not_ssl: true
+      valid_status_codes: []  # any 2xx/3xx (HEAD on / can be 200/301/405)

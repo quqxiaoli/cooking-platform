@@ -24,7 +24,18 @@ database:
   log_level: warn
 
 redis:
-  addr: "redis:6379"   # compose service name; sentinel mode configured separately via env
+  # [Fix #5] prod uses Redis Sentinel for automatic failover.
+  # Topology (single-host, see docker-compose.prod.yml):
+  #   redis-master:6379  ←  data plane (replicated → redis-slave:6379)
+  #   redis-sentinel{1,2,3}:{26379,26380,26381}  ←  control plane (quorum=2)
+  # App-side: go-redis NewFailoverClient discovers current master via sentinels;
+  # password is shared between data and control planes (see deploy/redis/).
+  mode: sentinel
+  master_name: mymaster
+  sentinel_addrs:
+    - "redis-sentinel1:26379"
+    - "redis-sentinel2:26380"
+    - "redis-sentinel3:26381"
   password: "<REDIS_PASSWORD>"
   db: 0
   pool_size: 20

@@ -52,14 +52,31 @@ type DatabaseConfig struct {
 	LogLevel     string        `mapstructure:"log_level"` // silent | error | warn | info
 }
 
+// RedisConfig drives the Redis client factory in cmd/server/main.go.
+//
+// Two modes are supported:
+//
+//   - Mode="plain" (default, backward-compatible): single Redis instance.
+//     Addr is required; SentinelAddrs / MasterName are ignored.
+//   - Mode="sentinel": NewFailoverClient. SentinelAddrs and MasterName
+//     are required; Addr is ignored. Used by prod for进程级 failover —
+//     master Redis OOM / restart triggers automatic promotion of a slave
+//     within ~5s. See deploy/redis/sentinelN.conf.tpl for the sentinel
+//     side of the topology.
+//
+// Backward compatibility: empty Mode is treated as "plain", so existing
+// config files (configs/config.yaml dev / docker) need no change.
 type RedisConfig struct {
-	Addr         string        `mapstructure:"addr"`
-	Password     string        `mapstructure:"password"`
-	DB           int           `mapstructure:"db"`
-	PoolSize     int           `mapstructure:"pool_size"`
-	DialTimeout  time.Duration `mapstructure:"dial_timeout"`
-	ReadTimeout  time.Duration `mapstructure:"read_timeout"`
-	WriteTimeout time.Duration `mapstructure:"write_timeout"`
+	Mode          string        `mapstructure:"mode"`           // plain (default) | sentinel
+	Addr          string        `mapstructure:"addr"`           // required when mode=plain
+	MasterName    string        `mapstructure:"master_name"`    // required when mode=sentinel
+	SentinelAddrs []string      `mapstructure:"sentinel_addrs"` // required when mode=sentinel
+	Password      string        `mapstructure:"password"`
+	DB            int           `mapstructure:"db"`
+	PoolSize      int           `mapstructure:"pool_size"`
+	DialTimeout   time.Duration `mapstructure:"dial_timeout"`
+	ReadTimeout   time.Duration `mapstructure:"read_timeout"`
+	WriteTimeout  time.Duration `mapstructure:"write_timeout"`
 }
 
 type LogConfig struct {
@@ -330,6 +347,7 @@ func registerDefaults(v *viper.Viper) {
 	v.SetDefault("database.log_level", "warn")
 	v.SetDefault("database.slaves_dsn", []string{}) // [Step 14] empty → single-master mode
 
+	v.SetDefault("redis.mode", "plain") // [Fix #5] backward-compatible: empty mode → plain single instance
 	v.SetDefault("redis.pool_size", 10)
 	v.SetDefault("redis.dial_timeout", "5s")
 	v.SetDefault("redis.read_timeout", "3s")
@@ -418,8 +436,23 @@ func validate(cfg *Config) error {
 	if cfg.Database.DSN == "" {
 		return fmt.Errorf("database.dsn is required")
 	}
-	if cfg.Redis.Addr == "" {
-		return fmt.Errorf("redis.addr is required")
+	// [Fix #5] mode-aware Redis validation — plain mode keeps backward
+	// compatibility (dev / docker), sentinel mode enables prod high-availability
+	// via three sentinel processes monitoring 1 master + 1 slave on the same host.
+	switch cfg.Redis.Mode {
+	case "", "plain":
+		if cfg.Redis.Addr == "" {
+			return fmt.Errorf("redis.addr is required when redis.mode=plain")
+		}
+	case "sentinel":
+		if cfg.Redis.MasterName == "" {
+			return fmt.Errorf("redis.master_name is required when redis.mode=sentinel")
+		}
+		if len(cfg.Redis.SentinelAddrs) == 0 {
+			return fmt.Errorf("redis.sentinel_addrs is required when redis.mode=sentinel")
+		}
+	default:
+		return fmt.Errorf("redis.mode must be 'plain' or 'sentinel', got %q", cfg.Redis.Mode)
 	}
 	if len(cfg.JWT.Secret) < 32 {
 		return fmt.Errorf("jwt.secret must be at least 32 characters")

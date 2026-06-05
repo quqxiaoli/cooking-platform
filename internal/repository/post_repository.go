@@ -173,7 +173,7 @@ func (r *postRepository) CreateWithSteps(ctx context.Context, p *model.Post, ste
 // FindByID looks up a post by primary key.
 func (r *postRepository) FindByID(ctx context.Context, id int64) (*model.Post, error) {
 	var p model.Post
-	err := r.db.WithContext(ctx).First(&p, id).Error
+	err := Apply(ctx, r.db).First(&p, id).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrPostNotFound
@@ -193,7 +193,7 @@ func (r *postRepository) FindByID(ctx context.Context, id int64) (*model.Post, e
 // up-to-30-row) result set in memory. Cheap.
 func (r *postRepository) LoadSteps(ctx context.Context, postID int64) ([]*model.PostStep, error) {
 	var steps []*model.PostStep
-	err := r.db.WithContext(ctx).
+	err := Apply(ctx, r.db).
 		Where("post_id = ?", postID).
 		Order("step_no ASC").
 		Find(&steps).Error
@@ -268,7 +268,7 @@ func (r *postRepository) UpdateAuditStatus(ctx context.Context, postID int64, au
 // of the includeInvisible if-statement keep user_id as the leftmost
 // predicate, so the index is always usable.
 func (r *postRepository) ListByUser(ctx context.Context, userID int64, includeInvisible bool, cursorTime time.Time, size int) ([]*model.Post, error) {
-	q := r.db.WithContext(ctx).
+	q := Apply(ctx, r.db).
 		Model(&model.Post{}).
 		Where("user_id = ?", userID)
 

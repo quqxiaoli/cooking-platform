@@ -2,6 +2,18 @@ global:
   scrape_interval: 15s       # how often to scrape targets
   evaluation_interval: 15s   # how often to evaluate rules
 
+# [Fix #6] Alert rule files. New alerts are appended here.
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+# [Fix #6] Alertmanager wiring.
+# alertmanager:9093 is reached via Docker DNS on cooking-prod-net.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
 # Scrape targets.
 # app1 and app2 are reached via Docker internal network (service names).
 # We scrape both instances directly, bypassing Nginx, so per-instance metrics
@@ -15,3 +27,22 @@ scrape_configs:
     metrics_path: /metrics
     # instance label will be "app1:8080" / "app2:8080" by default;
     # allows Grafana to filter panels per instance.
+
+  # [Fix #6] blackbox_exporter probes mellowck.com / 443 to detect cert
+  # expiry. probe_ssl_earliest_cert_expiry is the seconds-since-epoch of
+  # the soonest-expiring leaf cert in the chain — the HTTPSCertExpiringSoon
+  # alert fires when it crosses below now+14d.
+  - job_name: blackbox-https
+    metrics_path: /probe
+    params:
+      module: [https_cert_check]
+    static_configs:
+      - targets:
+          - https://mellowck.com
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115

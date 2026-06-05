@@ -149,13 +149,18 @@ func main() {
 	userRepo := repository.NewUserRepository(db)
 	jwtMgr := jwtpkg.NewManager(cfg.JWT)
 
+	// [Fix #1] Shared write marker — Post/Follow/User services all stamp it on
+	// writes and probe it on reads to force-route to the master for ~5s after a
+	// write. Closes the read-after-write race created by DBResolver slave reads.
+	writeMarker := cache.NewWriteMarker(rdb, 5*time.Second)
+
 	smsSender, err := sms.NewSender(cfg.SMS)
 	if err != nil {
 		log.Fatal("init sms sender", zap.Error(err))
 	}
 	log.Info("sms sender initialized", zap.String("provider", cfg.SMS.Provider))
 
-	userSvc := service.NewUserService(userRepo, userCache, jwtMgr, smsSender, cfg.SMS, cfg.OSS, cfg.Encryption, cfg.Ratelimit)
+	userSvc := service.NewUserService(userRepo, userCache, writeMarker, jwtMgr, smsSender, cfg.SMS, cfg.OSS, cfg.Encryption, cfg.Ratelimit)
 	userHandler := handler.NewUserHandler(userSvc)
 
 	// ── 7.5 [Step 4] Post module wiring ───────────────────────────────────────
@@ -167,7 +172,7 @@ func main() {
 	// and SearchService — single source of truth for author-snapshot
 	// assembly.
 	authorAssembler := service.NewAuthorAssembler(userRepo)
-	postSvc := service.NewPostService(postRepo, userRepo, feedCache, bus, authorAssembler, cfg.OSS, cfg.Cache)
+	postSvc := service.NewPostService(postRepo, userRepo, feedCache, writeMarker, bus, authorAssembler, cfg.OSS, cfg.Cache)
 	postHandler := handler.NewPostHandler(postSvc)
 	feedHandler := handler.NewFeedHandler(postSvc)
 	log.Info("post module wired")
@@ -202,6 +207,16 @@ func main() {
 	consumerMgr.Register(consumer.NewAuditConsumer(bus, postRepo, auditRepo, auditor, feedCache))
 	consumerMgr.StartAll()
 
+	// [Fix #3] DLX depth monitor — RabbitMQ bus only. The ChannelBus
+	// implementation does not have a dead-letter queue (in-memory channels
+	// drop or block) so the type assertion is the gate. dlxMonitorCtx is the
+	// long-lived background context; the goroutine exits at shutdown via
+	// cancelDLX below.
+	dlxMonitorCtx, cancelDLX := context.WithCancel(context.Background())
+	if inspector, ok := bus.(consumer.DLXInspector); ok {
+		consumer.StartDLXMonitor(dlxMonitorCtx, inspector)
+	}
+
 	// ── 7.7 [Step 7] Search module wiring ─────────────────────────────────────
 	searchRepo := repository.NewSearchRepository(db)
 	searchSvc := service.NewSearchService(searchRepo, authorAssembler, cfg.Search)
@@ -210,7 +225,7 @@ func main() {
 
 	// ── 7.8 [Step 8] Follow module wiring ─────────────────────────────────────
 	followRepo := repository.NewFollowRepository(db)
-	followSvc := service.NewFollowService(followRepo, userRepo, bus, cfg.Follow)
+	followSvc := service.NewFollowService(followRepo, userRepo, bus, writeMarker, cfg.Follow)
 	followHandler := handler.NewFollowHandler(followSvc)
 	log.Info("follow module wired")
 
@@ -295,6 +310,9 @@ func main() {
 	// Phase 2: Consumer + EventBus (≤15s) — drain in-flight events, then
 	// close the bus so subscribers wake from blocking deliveries.
 	phase2Ctx, phase2Cancel := context.WithTimeout(parentCtx, 15*time.Second)
+	// [Fix #3] Stop the DLX monitor before the bus is closed; otherwise the
+	// goroutine's next QueueDeclare hits a closed channel and logs a noisy WARN.
+	cancelDLX()
 	if err := consumerMgr.Shutdown(phase2Ctx); err != nil {
 		log.Warn("phase2 consumer manager shutdown",
 			zap.Error(err),
@@ -574,17 +592,43 @@ func initMySQL(cfg config.DatabaseConfig) (*gorm.DB, error) {
 	return db, nil
 }
 
-// initRedis is unchanged from Step 1.
+// initRedis builds the Redis client based on cfg.Mode.
+//
+// plain (default): single-instance NewClient pointing at cfg.Addr — used by
+// dev / docker-compose stacks where Redis is one container.
+//
+// sentinel ([Fix #5]): NewFailoverClient that consults cfg.SentinelAddrs to
+// discover the current master of cfg.MasterName. Used by prod for failover —
+// master OOM / restart triggers automatic slave promotion within ~5s and the
+// client transparently retries on the new master. The same Password is reused
+// for both Redis (data plane) and Sentinel (control plane) since both
+// processes are configured with the same auth in deploy/redis/*.conf.tpl.
 func initRedis(cfg config.RedisConfig) (*goredis.Client, error) {
-	rdb := goredis.NewClient(&goredis.Options{
-		Addr:         cfg.Addr,
-		Password:     cfg.Password,
-		DB:           cfg.DB,
-		PoolSize:     cfg.PoolSize,
-		DialTimeout:  cfg.DialTimeout,
-		ReadTimeout:  cfg.ReadTimeout,
-		WriteTimeout: cfg.WriteTimeout,
-	})
+	var rdb *goredis.Client
+	switch cfg.Mode {
+	case "sentinel":
+		rdb = goredis.NewFailoverClient(&goredis.FailoverOptions{
+			MasterName:       cfg.MasterName,
+			SentinelAddrs:    cfg.SentinelAddrs,
+			Password:         cfg.Password,
+			SentinelPassword: cfg.Password,
+			DB:               cfg.DB,
+			PoolSize:         cfg.PoolSize,
+			DialTimeout:      cfg.DialTimeout,
+			ReadTimeout:      cfg.ReadTimeout,
+			WriteTimeout:     cfg.WriteTimeout,
+		})
+	default: // "plain" or ""
+		rdb = goredis.NewClient(&goredis.Options{
+			Addr:         cfg.Addr,
+			Password:     cfg.Password,
+			DB:           cfg.DB,
+			PoolSize:     cfg.PoolSize,
+			DialTimeout:  cfg.DialTimeout,
+			ReadTimeout:  cfg.ReadTimeout,
+			WriteTimeout: cfg.WriteTimeout,
+		})
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

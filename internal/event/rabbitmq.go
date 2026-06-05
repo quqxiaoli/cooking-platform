@@ -197,6 +197,42 @@ func queueName(topic string) string {
 	return "cooking." + topic
 }
 
+// DLXQueueDepth returns the current number of unacknowledged messages sitting
+// in the dead-letter queue. ([Fix #3] message-graveyard monitoring.)
+//
+// Non-zero values mean handlers have rejected messages and operators must
+// inspect / replay them before the queue grows unbounded. Called by the
+// goroutine in internal/consumer/dlx_monitor.go on a 30s ticker.
+//
+// Implementation uses a short-lived inspection channel rather than the shared
+// publish channel to avoid contention with hot-path publishes. QueueDeclare
+// (with the same args as declareTopology) is idempotent: it returns the
+// queue's current state without recreating it.
+func (b *RabbitMQBus) DLXQueueDepth() (int, error) {
+	if b.closed.Load() {
+		return 0, errors.New("rabbitmq bus: dlx depth on closed bus")
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if err := b.ensureConnLocked(); err != nil {
+		return 0, fmt.Errorf("rabbitmq dlx depth: ensure conn: %w", err)
+	}
+
+	ch, err := b.conn.Channel()
+	if err != nil {
+		return 0, fmt.Errorf("rabbitmq dlx depth: open channel: %w", err)
+	}
+	defer func() { _ = ch.Close() }()
+
+	q, err := ch.QueueDeclare(rabbitMQDLXQueue, true, false, false, false, nil)
+	if err != nil {
+		return 0, fmt.Errorf("rabbitmq dlx depth: declare: %w", err)
+	}
+	return q.Messages, nil
+}
+
 // reconnectDelay returns the exponential backoff duration for attempt n (1-indexed).
 // Formula: ReconnectInitialDelay × 2^(n-1), capped at 30s.
 func (b *RabbitMQBus) reconnectDelay(attempt int) time.Duration {

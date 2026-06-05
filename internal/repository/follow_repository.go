@@ -179,7 +179,7 @@ func (r *followRepository) Delete(ctx context.Context, followerID, followingID i
 // nullable `SELECT 1` that returns zero rows on a miss.
 func (r *followRepository) Exists(ctx context.Context, followerID, followingID int64) (bool, error) {
 	var exists bool
-	err := r.db.WithContext(ctx).
+	err := Apply(ctx, r.db).
 		Raw("SELECT EXISTS(SELECT 1 FROM follows WHERE follower_id = ? AND following_id = ?)",
 			followerID, followingID).
 		Scan(&exists).Error
@@ -196,7 +196,7 @@ func (r *followRepository) Exists(ctx context.Context, followerID, followingID i
 // authoritative number.
 func (r *followRepository) CountFollowing(ctx context.Context, followerID int64) (int64, error) {
 	var cnt int64
-	err := r.db.WithContext(ctx).
+	err := Apply(ctx, r.db).
 		Model(&model.Follow{}).
 		Where("follower_id = ?", followerID).
 		Count(&cnt).Error
@@ -255,7 +255,7 @@ func (r *followRepository) listJoin(ctx context.Context, dir joinDir, pivotID, c
 		return nil, fmt.Errorf("follow list join: unknown direction %d", dir)
 	}
 
-	q := r.db.WithContext(ctx).
+	q := Apply(ctx, r.db).
 		Table("follows AS f").
 		Select("u.id, u.nickname, u.avatar_url, f.id AS follow_id").
 		Joins("JOIN users u ON u.id = "+joinCol).

@@ -283,6 +283,28 @@ ssh -L 3000:127.0.0.1:3000 -i ~/.ssh/id_cooking_platform root@47.238.29.251
 
 ## §8 维护操作 SOP
 
+### 8.0 部署后一次性强化（每台 prod 机器必做）
+
+`.env.prod` 包含 MySQL root / Redis / JWT / OSS AK 等全量生产凭证，必须收紧文件权限到只有 root 可读。docker compose 以 root 身份读取 env-file，不影响容器启动。
+
+```bash
+# 在服务器 47.238.29.251 上
+ssh root@47.238.29.251
+cd /opt/cooking-platform
+
+# 1. 收紧 .env.prod 权限
+chown root:root .env.prod
+chmod 600 .env.prod
+
+# 2. 验证（必须看到 -rw------- 1 root root）
+ls -l .env.prod
+
+# 3. 若同机还有备份或临时副本（如 .env.prod.bak），同样处理
+find /opt/cooking-platform -maxdepth 2 -name '.env*' -not -name '*.example' -exec ls -l {} \;
+```
+
+如果 `.env.prod` 之前是 644，旁路用户在共享机器上能直接 `cat` 出全部生产密钥 —— chmod 后这条路就堵死了。月度巡检会再次 verify（见 §8.1 第 5 条）。
+
 ### 8.1 每月一次
 
 ```bash
@@ -299,6 +321,10 @@ ssh root@47.238.29.251 'df -h && du -sh /var/lib/docker/volumes/*'
 # 4. 日志容量（避免无限增长）
 ssh root@47.238.29.251 'docker exec cooking-app1-prod du -sh /var/log/cooking/'
 # > 1G 时考虑加 logrotate
+
+# 5. .env.prod 权限回归检查（防止 scp / cp / git stash 意外把模式还原成 644）
+ssh root@47.238.29.251 'stat -c "%a %U:%G %n" /opt/cooking-platform/.env.prod'
+# 必须输出 "600 root:root /opt/cooking-platform/.env.prod"，否则按 §8.0 重新收紧
 ```
 
 ### 8.2 每季度一次

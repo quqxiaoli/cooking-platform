@@ -70,7 +70,7 @@ func (r *userRepository) FindByPhoneHash(ctx context.Context, phoneHash string) 
 // JWT validation) and by GET /users/:id.
 func (r *userRepository) FindByID(ctx context.Context, id int64) (*model.User, error) {
 	var u model.User
-	err := r.db.WithContext(ctx).First(&u, id).Error
+	err := Apply(ctx, r.db).First(&u, id).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrUserNotFound
