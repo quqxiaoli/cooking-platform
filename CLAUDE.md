@@ -32,7 +32,7 @@
 | 优先级 | 文档 | 用途 |
 | --- | --- | --- |
 | P0 | `docs/prd/PRD-Final-v3.0.md` | 最终权威 PRD，接口契约 / 错误码 / 架构决策的唯一真相源 |
-| P0 | `docs/PROJECT_RETROSPECTIVE.md` | 项目总复盘，包含 12 个关键技术决策的完整背景 |
+| P0 | `docs/project/PROJECT_RETROSPECTIVE.md` | 项目总复盘，包含 12 个关键技术决策的完整背景 |
 | P1 | `docs/progress/18_项目进度追踪.md` | Step 18 服务器+域名+HTTPS 全过程 |
 | P1 | `docs/progress/19_项目进度追踪.md` | Step 19 数据库迁移+部署联调（含 Viper 嵌套 env 排查复盘） |
 | P1 | `docs/progress/20_项目进度追踪.md` | Step 20 公网验证 + 压测 |
@@ -458,7 +458,7 @@ docker exec cooking-app1-prod sh -c "grep ERROR /var/log/cooking/app.log | jq ."
 
 | 项 | 位置 |
 | --- | --- |
-| `.env.prod` 真实密钥 | **小离本地** `docs/prod.md`（唯一备份，定期检查完整性） |
+| `.env.prod` 真实密钥 | **小离本地** `docs/ops/prod.md`（唯一备份，定期检查完整性） |
 | 服务器 SSH 私钥 | `~/.ssh/id_cooking_platform`（本地） |
 | 域名注册商 | 阿里云万网（mellowck.com 自动续费已开启） |
 | OSS Bucket | `cooking-platform-prod`（香港，公共读 + CORS） |
