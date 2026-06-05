@@ -9,11 +9,14 @@
 
 | 环境 | URL |
 | --- | --- |
-| 生产 | `https://mellowck.com` |
+| 生产 | `https://api.mellowck.com` |
 | 本地开发 | `http://127.0.0.1:8080` |
 
 所有业务接口统一前缀 `/api/v1/`；基础设施探针（`/health` / `/readiness` / `/metrics`）不带 `/api` 前缀。
 代码依据：`cmd/server/main.go:402` `v1 := r.Group("/api/v1")`。
+
+> **2026-05-31 域名拆分**:前端上线后,主域 `mellowck.com` 归前端 Next.js BFF,后端迁子域 `api.mellowck.com`。
+> 旧 `https://mellowck.com/api/v1/*` 走 nginx 301 兜底到新地址,API 消费者请尽快切换 base URL。
 
 ---
 

@@ -167,7 +167,8 @@ follow:
 # (config.Validate refuses release mode + "*" combination, CORS-01).
 cors:
   allowed_origins:
-    - "https://cooking.example.com"   # replace with real public domain at go-live
+    - "https://mellowck.com"
+    - "https://www.mellowck.com"
   allowed_methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
   allowed_headers: ["Origin", "Content-Type", "Authorization", "X-Request-ID"]
   expose_headers: ["X-Request-ID"]
