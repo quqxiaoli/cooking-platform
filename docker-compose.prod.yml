@@ -273,6 +273,8 @@ services:
       APP_MQ_URL: ${APP_MQ_URL:?APP_MQ_URL is required}
       APP_OSS_ACCESS_KEY_ID: ${APP_OSS_ACCESS_KEY_ID:?APP_OSS_ACCESS_KEY_ID is required}
       APP_OSS_ACCESS_KEY_SECRET: ${APP_OSS_ACCESS_KEY_SECRET:?APP_OSS_ACCESS_KEY_SECRET is required}
+      # 2026-06-29 hotfix：image 内 yaml 仍是无 scheme 的旧 endpoint，env 强制覆盖；下次 rebuild 后可删除。
+      APP_OSS_ENDPOINT: https://oss-cn-hongkong.aliyuncs.com
       APP_SMS_ACCESS_KEY_ID: ${APP_SMS_ACCESS_KEY_ID:?APP_SMS_ACCESS_KEY_ID is required}
       APP_SMS_ACCESS_KEY_SECRET: ${APP_SMS_ACCESS_KEY_SECRET:?APP_SMS_ACCESS_KEY_SECRET is required}
       APP_AUDIT_ACCESS_KEY_ID: ${APP_AUDIT_ACCESS_KEY_ID:?APP_AUDIT_ACCESS_KEY_ID is required}
@@ -318,6 +320,8 @@ services:
       APP_MQ_URL: ${APP_MQ_URL}
       APP_OSS_ACCESS_KEY_ID: ${APP_OSS_ACCESS_KEY_ID}
       APP_OSS_ACCESS_KEY_SECRET: ${APP_OSS_ACCESS_KEY_SECRET}
+      # 2026-06-29 hotfix：image 内 yaml 仍是无 scheme 的旧 endpoint，env 强制覆盖；下次 rebuild 后可删除。
+      APP_OSS_ENDPOINT: https://oss-cn-hongkong.aliyuncs.com
       APP_SMS_ACCESS_KEY_ID: ${APP_SMS_ACCESS_KEY_ID}
       APP_SMS_ACCESS_KEY_SECRET: ${APP_SMS_ACCESS_KEY_SECRET}
       APP_AUDIT_ACCESS_KEY_ID: ${APP_AUDIT_ACCESS_KEY_ID}

@@ -101,7 +101,7 @@ oss:
   provider: aliyun
   access_key_id: "<OSS_ACCESS_KEY_ID>"
   access_key_secret: "<OSS_ACCESS_KEY_SECRET>"
-  endpoint: oss-cn-hongkong.aliyuncs.com
+  endpoint: https://oss-cn-hongkong.aliyuncs.com
   bucket: cooking-platform-prod
   url_prefix: "https://cooking-platform-prod.oss-cn-hongkong.aliyuncs.com/"
   presign_ttl: 15m
